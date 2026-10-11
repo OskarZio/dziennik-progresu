@@ -48,7 +48,9 @@ const SAMPLE_PLAN = () => ({ updatedAt: 0, days: [
 let S = store.get("dp.state") || { v:1, name:"", plan: SAMPLE_PLAN(), samplePlan:true, workouts:{}, friends:[] };
 if(!S.workouts) S.workouts = {};
 if(!S.friends) S.friends = [];
-S.settings = Object.assign({ prog:"drop", bands: DEFAULT_BANDS.map(b=>({...b})) }, S.settings||{});
+S.settings = Object.assign({ prog:"drop", tempo:"2010", theme:{ mode:"auto", accent:"", bg:"" }, bands: DEFAULT_BANDS.map(b=>({...b})) }, S.settings||{});
+if(!S.settings.theme) S.settings.theme = { mode:"auto", accent:"", bg:"" };
+if(!S.settings.tempo) S.settings.tempo = "2010";
 let UI = Object.assign({ tab:"train", activeId:null, statEx:null }, store.get("dp.ui")||{});
 const saveLocal = () => { store.set("dp.state", S); store.set("dp.ui", UI); };
 
@@ -164,6 +166,34 @@ function achievements(workouts){
       if(sg && sg.kind==="up") out.push({ date:w.date, kind:"done", t:`Cel zrobiony: ${ex.name}`, d: sg.text });
     }
   });
+  // Totals and habits across the whole log
+  let tonnage = 0, sets = 0, firstVid = false, firstInsta = false; const tonHit = {}, setHit = {};
+  const weekOf = iso => { const d = new Date(iso+"T12:00:00"); const day = (d.getDay()+6)%7; d.setDate(d.getDate()-day); return d.toISOString().slice(0,10); };
+  const weeks = {};
+  workouts.forEach(w => {
+    weeks[weekOf(w.date)] = (weeks[weekOf(w.date)]||0) + 1;
+    if(weeks[weekOf(w.date)]===3) out.push({ date:w.date, kind:"count", t:"3 treningi w jednym tygodniu", d:"Pełny tydzień roboty." });
+    for(const ex of w.exercises){
+      const st = exStats(ex); sets += st.sets; if(typeOf(ex)==="weight") tonnage += st.vol;
+      for(const s of ex.sets){
+        if(s.video && !firstVid){ firstVid = true; out.push({ date:w.date, kind:"done", t:"Pierwszy nagrany film", d:`${ex.name}. Technika pod kontrolą.` }); }
+        if(s.video && s.insta && s.insta.ok && !firstInsta){ firstInsta = true; out.push({ date:w.date, kind:"pr", t:"🎥 Pierwszy film na Insta", d:`${ex.name} przeszło listę kontrolną.` }); }
+      }
+      if(typeOf(ex)==="band" && ex.sets.some(s=>setDone(ex,s) && s.b>=bands().length)) {
+        const k = "free:"+keyOf(ex); if(!tonHit[k]){ tonHit[k]=1; out.push({ date:w.date, kind:"pr", t:`Bez gumy: ${ex.name}`, d:"Pełne powtórzenia bez odciążenia." }); }
+      }
+    }
+    for(const t of [1000,5000,10000,25000,50000,100000]) if(tonnage>=t && !tonHit[t]){ tonHit[t]=1; out.push({ date:w.date, kind:"gain", t:`${fmtKg(t/1000)} t podniesione łącznie`, d:"Suma kg × powtórzeń ze wszystkich treningów." }); }
+    for(const n of [100,500,1000]) if(sets>=n && !setHit[n]){ setHit[n]=1; out.push({ date:w.date, kind:"count", t:`${n} serii`, d:"Każda seria się liczy." }); }
+  });
+  // weeks in a row with at least one workout
+  const ks = Object.keys(weeks).sort(); let run = 1, hit = {};
+  for(let i=1;i<ks.length;i++){
+    const prev = new Date(ks[i-1]+"T12:00:00"); prev.setDate(prev.getDate()+7);
+    run = prev.toISOString().slice(0,10)===ks[i] ? run+1 : 1;
+    for(const n of [4,8,12,26,52]) if(run===n && !hit[n]){ hit[n]=1; out.push({ date:ks[i], kind:"done", t:`${n} tygodni z rzędu`, d:"Bez przerwy, co tydzień przynajmniej jeden trening." }); }
+  }
+  out.sort((a,b)=> a.date<b.date?-1:a.date>b.date?1:0);
   return out.reverse();
 }
 function gains(workouts){
@@ -240,7 +270,7 @@ async function pull(){
     if(mine){
       if(mine.plan && (mine.plan.updatedAt||0) > (S.plan.updatedAt||0)){ S.plan = mine.plan; S.samplePlan = false; changed = true; }
       if(mine.name && !S.name) S.name = mine.name;
-      if(mine.settings && (mine.settings.updatedAt||0) > (S.settings.updatedAt||0)){ S.settings = mine.settings; changed = true; }
+      if(mine.settings && (mine.settings.updatedAt||0) > (S.settings.updatedAt||0)){ S.settings = Object.assign({ tempo:"2010", theme:{ mode:"auto", accent:"", bg:"" } }, mine.settings); applyTheme(); changed = true; }
       if(Array.isArray(mine.friends) && (mine.friends_at||0) > (S.friendsAt||0)){ S.friends = mine.friends; S.friendsAt = mine.friends_at; }
     }
     // push whatever this device has that the server lacks or has older
@@ -404,7 +434,7 @@ function buildEx(pe, date, alts){
     }
   }
   return { exId:pe.id, name:pe.name, type:t, slot:(pe.slot||"").trim().toUpperCase(), alts: alts && alts.length>1 ? alts : undefined,
-    targetSets:pe.sets, repMin:pe.repMin, repMax:pe.repMax, inc:pe.inc, prog:pe.prog||"",
+    targetSets:pe.sets, repMin:pe.repMin, repMax:pe.repMax, inc:pe.inc, prog:pe.prog||"", tempo: t==="time" ? undefined : (pe.tempo ?? S.settings.tempo),
     secGoal: t==="time" ? secGoal : undefined, secInc: pe.secInc, goalReps, hint,
     sets: Array.from({length:pe.sets}, () => t==="time" ? { sec:null, rate:null, fat:null, note:"", video:null }
       : t==="band" ? { b:band, r:null, rir:null, rate:null, fat:null, note:"", video:null }
@@ -454,7 +484,7 @@ function goalText(ex){
   const t = typeOf(ex);
   if(t==="time") return `Cel: ${ex.targetSets} × ${ex.secGoal||"?"} s`;
   const g = ex.goalReps ? ` · dziś celuj w ${ex.goalReps}` : "";
-  return `Cel: ${ex.targetSets} × ${ex.repMin}–${ex.repMax} powt.${g}`;
+  return `Cel: ${ex.targetSets} × ${ex.repMin}–${ex.repMax} powt.${g}${ex.tempo ? ` · tempo ${esc(ex.tempo)}` : ""}`;
 }
 function exCard(w, ex, i){
   const prev = previousEx(keyOf(ex), w.date, w.id);
@@ -522,6 +552,7 @@ function planExRow(e, di, ei){
   let fields;
   if(t==="time") fields = f("sets","Serie",e.sets) + f("secGoal","Cel (s)",e.secGoal) + f("secInc","Krok (s)",e.secInc);
   else fields = f("sets","Serie",e.sets) + f("repMin","Powt. min",e.repMin) + f("repMax","Cel powt.",e.repMax)
+    + `<label class="field"><span class="label">Tempo</span><input type="text" inputmode="numeric" maxlength="7" data-pe="tempo" value="${esc(e.tempo ?? S.settings.tempo)}"></label>`
     + (t==="band" ? `<label class="field wide"><span class="label">Guma na start</span>${bandSelect('data-pe="band"', e.band??0)}</label>`
                   : f("weight","Start kg",e.weight,"decimal") + f("inc","Krok kg",e.inc,"decimal"));
   const progSel = t==="time" ? "" : `<label class="field prog"><span class="label">Po zrobieniu celu</span><select data-pe="prog">
@@ -532,8 +563,8 @@ function planExRow(e, di, ei){
   const mates = slot ? S.plan.days[di].exercises.filter(o => o!==e && (o.slot||"").trim().toUpperCase()===slot) : [];
   return `<div class="plan-ex ${mates.length?"variant":""}" data-pex="${di}.${ei}">
     <div class="plan-top">
-      <label class="field slot"><span class="label">Pozycja</span><input type="text" data-pe="slot" value="${esc(e.slot||"")}" placeholder="A1" maxlength="4" autocapitalize="characters"></label>
-      <label class="field nm"><span class="label">Ćwiczenie</span><input type="text" data-pe="name" value="${esc(e.name)}"></label>
+      <label class="field slot"><span class="label">Pozycja</span><input type="text" data-pe="slot" value="${esc(e.slot||"")}" placeholder="${String.fromCharCode(65 + Math.min(25, ei))}" maxlength="4" autocapitalize="characters"></label>
+      <label class="field nm"><span class="label">Ćwiczenie</span><input type="text" data-pe="name" value="${esc(e.name)}" placeholder="np. Wyciskanie leżąc"></label>
       <label class="field tp"><span class="label">Rodzaj</span><select data-pe="type">${Object.entries(TYPES).map(([k,v])=>`<option value="${k}" ${t===k?"selected":""}>${v}</option>`).join("")}</select></label>
       <button class="btn sm ghost" data-rmex="${di}.${ei}" aria-label="Usuń ćwiczenie">✕</button>
     </div>
@@ -550,7 +581,7 @@ function viewPlan(){
   <section class="card">
     <div class="row between"><h2>Twój plan</h2>${S.samplePlan?'<span class="sample-tag">Przykład</span>':""}</div>
     <p class="small muted" style="margin:0">Ustaw serie i zakres powtórzeń. Gdy zrobisz wszystkie serie na „cel powt.”, aplikacja podpowie więcej kg albo słabszą gumę. Ćwiczenia na czas, np. stanie na rękach, liczą sekundy, technikę i ciężkość.</p>
-    <p class="small muted" style="margin:0">Dwa ćwiczenia z tą samą pozycją (np. A1: wyciskanie i A1: OHP) są wymienne. Aplikacja na zmianę wybiera to, które robiłeś dawniej, a na treningu możesz je zamienić ręcznie. Progres liczy się po nazwie ćwiczenia, więc ćwiczenie o tej samej nazwie ma wspólną historię we wszystkich planach.</p>
+    <p class="small muted" style="margin:0">Dwa ćwiczenia z tą samą pozycją (np. A: wyciskanie i A: OHP) są wymienne. Aplikacja na zmianę wybiera to, które robiłeś dawniej, a na treningu możesz je zamienić ręcznie. Progres liczy się po nazwie ćwiczenia, więc ćwiczenie o tej samej nazwie ma wspólną historię we wszystkich planach.</p>
   </section>
   ${S.plan.days.map((d,di)=>`
   <section class="card" data-day="${di}">
@@ -561,18 +592,28 @@ function viewPlan(){
   </section>`).join("")}
   <div class="row"><button class="btn primary" data-addday>+ Dodaj dzień treningowy</button></div>
   <section class="card">
-    <h2>Ustawienia progresji</h2>
-    <label class="field" style="max-width:520px"><span class="label">Gdy zrobisz cel (np. 3 × 8)</span>
+    <h2>Ustawienia</h2>
+    <h3>Progresja</h3>
+    <label class="field"><span class="label">Gdy zrobisz cel</span>
       <select id="set-prog">
-        <option value="drop" ${st.prog==="drop"?"selected":""}>Dołóż kg i zmniejsz powtórzenia do minimum (3 × 8 → 3 × 6, +2,5 kg)</option>
-        <option value="keep" ${st.prog==="keep"?"selected":""}>Dołóż kg, powtórzenia bez zmian (3 × 8 → 3 × 8, +2,5 kg)</option>
+        <option value="drop" ${st.prog==="drop"?"selected":""}>Więcej kg, powt. do minimum</option>
+        <option value="keep" ${st.prog==="keep"?"selected":""}>Więcej kg, powt. bez zmian</option>
       </select></label>
-    <p class="small muted" style="margin:0">Każde ćwiczenie może mieć własne ustawienie w polu „Po zrobieniu celu”. Wielkość dokładki ustawiasz w „Krok kg”.</p>
+    <p class="small muted" style="margin:0">„Do minimum”: zrobione 3 × 8 daje 3 × 6 i +2,5 kg. Każde ćwiczenie może mieć własne ustawienie w polu „Po zrobieniu celu”, a dokładkę ustawiasz w „Krok kg”.</p>
+    <label class="field" style="max-width:200px"><span class="label">Domyślne tempo</span><input type="text" id="set-tempo" value="${esc(st.tempo)}" inputmode="numeric" maxlength="7" placeholder="2010"></label>
+    <p class="small muted" style="margin:0">Tempo 2010: 2 s opuszczanie, 0 s pauza na dole, 1 s w górę, 0 s pauza na górze. Nowe ćwiczenia dostają to tempo, a w planie możesz je zmienić dla każdego ćwiczenia.</p>
+    <h3>Kolory aplikacji</h3>
+    <div class="field"><span class="label">Motyw</span><div class="seg" id="set-mode">${[["auto","Jak w telefonie"],["light","Jasny"],["dark","Ciemny"]].map(([k,n])=>`<button aria-pressed="${st.theme.mode===k}" data-mode="${k}">${n}</button>`).join("")}</div></div>
+    <div class="row">
+      <label class="row color-pick"><input type="color" id="set-accent" value="${esc(st.theme.accent || "#1f5fd1")}"><span>Przyciski</span></label>
+      <label class="row color-pick"><input type="color" id="set-bg" value="${esc(st.theme.bg || (document.documentElement.dataset.theme==="dark" || matchMedia("(prefers-color-scheme: dark)").matches ? "#0e131b" : "#eceff4"))}"><span>Tło</span></label>
+      <button class="btn sm ghost" data-resettheme>Przywróć domyślne</button>
+    </div>
     <h3>Twoje gumy</h3>
     <p class="small muted" style="margin:0">Od najmocniejszej (najwięcej pomaga) do najsłabszej. Progres to przejście na gumę niżej na liście.</p>
     <div class="bands">${st.bands.map((b,k)=>`<div class="row band-row" data-band="${k}">
       <input type="color" data-bf="color" value="${esc(b.color)}" aria-label="Kolor gumy">
-      <input type="text" data-bf="name" value="${esc(b.name)}" style="flex:1;max-width:260px" aria-label="Nazwa gumy">
+      <input type="text" data-bf="name" value="${esc(b.name)}" style="flex:1 1 120px;min-width:0;max-width:260px" aria-label="Nazwa gumy">
       ${k===st.bands.length-1 && st.bands.length>1 ? `<button class="btn sm ghost danger" data-rmband="${k}" aria-label="Usuń gumę">✕</button>`:""}</div>`).join("")}</div>
     <p class="small muted" style="margin:0">Nową gumę dodajesz na koniec listy jako najsłabszą, bo zapisane serie pamiętają pozycję gumy.</p>
     <div class="row"><button class="btn sm" data-addband>+ Guma</button></div>
@@ -916,13 +957,13 @@ document.addEventListener("click", async e => {
   if(d.rmday){ const di=+d.rmday; if(UI.confirmDay!==di){ UI.confirmDay=di; t.textContent="Na pewno?"; return; } S.plan.days.splice(di,1); UI.confirmDay=null; touchPlan(); render(); return; }
   if("addband" in d){ S.settings.bands.push({ name:"Nowa guma", color:"#888888" }); S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); render(); return; }
   if(d.rmband){ S.settings.bands.pop(); S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); render(); return; }
-  if(d.addex){ S.plan.days[+d.addex].exercises.push({ id:"e-"+uid(), name:"Nowe ćwiczenie", sets:3, repMin:8, repMax:12, weight:20, inc:2.5 }); touchPlan(); render(); return; }
+  if(d.addex){ const di = +d.addex, list = S.plan.days[di].exercises; list.push({ id:"e-"+uid(), name:"", sets:3, repMin:8, repMax:12, weight:20, inc:2.5, tempo:S.settings.tempo }); touchPlan(); render(); focusEnd(`[data-pex="${di}.${list.length-1}"] [data-pe="name"]`); return; }
   if(d.addvar){ const [di,ei] = d.addvar.split(".").map(Number); const list = S.plan.days[di].exercises, e = list[ei];
-    if(!(e.slot||"").trim()){ let n = 1, used = new Set(list.map(o=>(o.slot||"").trim().toUpperCase())); let lbl; do { lbl = String.fromCharCode(64 + Math.min(26, ei+n)) + "1"; n++; } while(used.has(lbl) && n < 30); e.slot = lbl; }
+    if(!(e.slot||"").trim()){ let n = 1, used = new Set(list.map(o=>(o.slot||"").trim().toUpperCase())); let lbl; do { lbl = String.fromCharCode(64 + Math.min(26, ei+n)); n++; } while(used.has(lbl) && n < 30); e.slot = lbl; }
     const copy = Object.assign({}, e, { id:"e-"+uid(), name:"" });
     let at = ei+1; while(at < list.length && (list[at].slot||"").trim().toUpperCase()===(e.slot||"").trim().toUpperCase()) at++;
     list.splice(at, 0, copy); touchPlan(); render();
-    const inp = document.querySelector(`[data-pex="${di}.${at}"] [data-pe="name"]`); if(inp) inp.focus(); return; }
+    focusEnd(`[data-pex="${di}.${at}"] [data-pe="name"]`); return; }
   if(d.rmex){ const [di,ei] = d.rmex.split(".").map(Number); S.plan.days[di].exercises.splice(ei,1); touchPlan(); render(); return; }
   // stats
   if("sample" in d){ loadSample(); return; }
@@ -950,7 +991,7 @@ document.addEventListener("input", e => {
   }
   if(d.wf){ const w = S.workouts[UI.activeId]; w[d.wf] = t.value; touchWorkout(w); if(d.wf==="date"){ w.exercises.forEach((_,i)=>refreshEx(i)); } return; }
   if(d.pd){ const di = +t.closest("[data-day]").dataset.day; S.plan.days[di].name = t.value; touchPlan(); return; }
-  if(d.pe){ const [di,ei] = t.closest("[data-pex]").dataset.pex.split(".").map(Number); const ex = S.plan.days[di].exercises[ei]; ex[d.pe] = (d.pe==="name"||d.pe==="prog"||d.pe==="type"||d.pe==="slot") ? t.value : (num(t.value) ?? 0);
+  if(d.pe){ const [di,ei] = t.closest("[data-pex]").dataset.pex.split(".").map(Number); const ex = S.plan.days[di].exercises[ei]; ex[d.pe] = (d.pe==="name"||d.pe==="prog"||d.pe==="type"||d.pe==="slot"||d.pe==="tempo") ? t.value : (num(t.value) ?? 0);
     if(d.pe==="type"){ if(t.value==="time"){ ex.secGoal = ex.secGoal||20; ex.secInc = ex.secInc||5; } if(t.value==="band" && ex.band==null) ex.band = 0; touchPlan(); render(); return; }
     touchPlan(); return; }
   if(d.bf){ const k = +t.closest("[data-band]").dataset.band; S.settings.bands[k][d.bf] = t.value; S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); return; }
@@ -984,6 +1025,34 @@ document.addEventListener("change", async e => {
 });
 
 function afterRender(){}
+/* Put the caret after the text, so typing continues the name instead of starting before it. */
+function focusEnd(sel){ const el = document.querySelector(sel); if(!el) return; el.focus(); const n = el.value.length; try{ el.setSelectionRange(n, n); }catch(e){} el.scrollIntoView({ block:"center" }); }
+document.addEventListener("focusin", e => { const t = e.target; if(t.matches && t.matches('input[type=text]')) setTimeout(() => { try{ const n = t.value.length; if(t.selectionStart===0 && t.selectionEnd===0 && n) t.setSelectionRange(n, n); }catch(err){} }, 0); });
+/* App colours: accent for buttons, custom background; text colours follow the background's brightness. */
+function hexLum(hex){ const m = /^#?([0-9a-f]{6})$/i.exec(hex||""); if(!m) return null; const v = parseInt(m[1],16), c = [v>>16, v>>8&255, v&255].map(x=>{ x/=255; return x<=0.03928 ? x/12.92 : Math.pow((x+0.055)/1.055, 2.4); }); return 0.2126*c[0]+0.7152*c[1]+0.0722*c[2]; }
+function applyTheme(){
+  const th = S.settings.theme || {}, root = document.documentElement;
+  let mode = th.mode && th.mode!=="auto" ? th.mode : null;
+  const bgL = hexLum(th.bg);
+  if(bgL!=null) mode = bgL < 0.2 ? "dark" : "light";
+  if(mode) root.dataset.theme = mode; else delete root.dataset.theme;
+  ["--accent","--accent-soft","--accent-ink","--bg"].forEach(v=>root.style.removeProperty(v));
+  if(th.accent){ root.style.setProperty("--accent", th.accent); root.style.setProperty("--accent-soft", `color-mix(in srgb, ${th.accent} 18%, transparent)`); root.style.setProperty("--accent-ink", hexLum(th.accent) > 0.4 ? "#141c2b" : "#ffffff"); }
+  if(th.bg) root.style.setProperty("--bg", th.bg);
+  const meta = document.querySelector('meta[name=theme-color]'); if(meta) meta.setAttribute("content", th.bg || th.accent || "#1f5fd1");
+}
+function saveTheme(){ S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); applyTheme(); }
+document.addEventListener("click", e => {
+  const m = e.target.closest("[data-mode]"); if(m){ S.settings.theme.mode = m.dataset.mode; S.settings.theme.bg = ""; saveTheme(); render(); return; }
+  if(e.target.closest("[data-resettheme]")){ S.settings.theme = { mode:"auto", accent:"", bg:"" }; saveTheme(); render(); }
+});
+document.addEventListener("input", e => {
+  const t = e.target;
+  if(t.id==="set-accent"){ S.settings.theme.accent = t.value; saveTheme(); }
+  if(t.id==="set-bg"){ S.settings.theme.bg = t.value; saveTheme(); }
+  if(t.id==="set-tempo"){ S.settings.tempo = t.value.replace(/[^0-9xX-]/g,"").slice(0,7); S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); }
+});
+applyTheme();
 document.addEventListener("submit", e => { if(e.target.id==="auth-form"){ e.preventDefault(); signIn("in"); } });
 /* Refresh: finish pending saves, fetch a newer app version if there is one, reload. */
 async function refreshAll(){
