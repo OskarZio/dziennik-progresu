@@ -52,10 +52,11 @@ button{cursor:pointer}
 /* shell */
 header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--bg);border-bottom:1px solid var(--line)}
 .top-in{max-width:980px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:12px}
-.brand{font-family:var(--f-display);font-size:1.45rem;font-weight:700;display:flex;align-items:center;gap:8px;letter-spacing:.02em}
+.brand{font-family:var(--f-display);font-size:clamp(1.15rem,5.2vw,1.45rem);white-space:nowrap;min-width:0;font-weight:700;display:flex;align-items:center;gap:8px;letter-spacing:.02em}
 .brand svg{flex:none}
-.sync{margin-left:auto;font-size:.78rem;display:flex;align-items:center;gap:6px;color:var(--muted);white-space:nowrap}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.sync{min-width:0;overflow:hidden;margin-left:auto;font-size:.78rem;display:flex;align-items:center;gap:6px;color:var(--muted);white-space:nowrap}
+.sync span:last-child{overflow:hidden;text-overflow:ellipsis}
+.dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--muted)}
 .dot.ok{background:var(--green)} .dot.busy{background:var(--yellow)} .dot.off{background:var(--muted)}
 nav.tabs{display:flex;gap:4px}
 nav.tabs button{border:0;background:none;padding:8px 12px;border-radius:999px;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:6px}
@@ -86,6 +87,13 @@ nav.tabs-bottom button[aria-current="true"]{background:var(--accent-soft);color:
 .btn:disabled{opacity:.5;cursor:default}
 input[type=text],input[type=email],input[type=password],input[type=number],input[type=date],select,textarea{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:0;width:100%}
 textarea{resize:vertical;min-height:60px}
+/* iOS: 16px stops Safari zooming into a field on focus; native date and number fields otherwise ignore the column width. */
+input,select,textarea{font-size:16px}
+input[type=text],input[type=email],input[type=password],input[type=number],input[type=date],select{min-height:42px}
+input[type=date]{-webkit-appearance:none;appearance:none;display:block;max-width:100%;text-align:left}
+input[type=date]::-webkit-date-and-time-value{text-align:left}
+input[type=number],input[type=text],input[type=email],input[type=password]{-webkit-appearance:none;appearance:none}
+html{touch-action:manipulation}
 input[type=number]{-moz-appearance:textfield}
 input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .field{display:flex;flex-direction:column;gap:4px;min-width:0}
@@ -140,13 +148,17 @@ input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appear
 .hist-main{flex:1;min-width:0}
 
 /* plan editor */
-.plan-ex{display:flex;flex-direction:column;gap:8px;padding-block:12px;border-top:1px dashed var(--line)}
-.plan-ex:first-of-type{border-top:0}
+.plan-ex{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+.plan-list{display:flex;flex-direction:column;gap:10px}
+.plan-ex input,.plan-ex select{background:var(--surface)}
 .plan-top{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1.3fr) auto;gap:8px;align-items:end}
-@media (max-width:520px){.plan-top{grid-template-columns:minmax(0,1fr) auto}.plan-top .nm{grid-column:1 / -1}}
-.plan-fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;align-items:end}
+@media (max-width:560px){.plan-top{grid-template-columns:minmax(0,1fr) auto}.plan-top .nm{grid-column:1 / -1}}
+.plan-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;align-items:end}
+@media (min-width:640px){.plan-fields{grid-template-columns:repeat(5,minmax(0,1fr))}}
 .plan-fields input{text-align:center}
-.plan-fields .prog{grid-column:1 / -1;max-width:360px}
+.plan-fields .wide{grid-column:span 2}
+.plan-fields .prog{grid-column:1 / -1}
+.plan-fields .label,.plan-top .label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .band-row input[type=color]{width:42px;height:38px;padding:2px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
 .bands{display:flex;flex-direction:column;gap:8px}
 

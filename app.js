@@ -489,7 +489,7 @@ function planExRow(e, di, ei){
   let fields;
   if(t==="time") fields = f("sets","Serie",e.sets) + f("secGoal","Cel (s)",e.secGoal) + f("secInc","Krok (s)",e.secInc);
   else fields = f("sets","Serie",e.sets) + f("repMin","Powt. min",e.repMin) + f("repMax","Cel powt.",e.repMax)
-    + (t==="band" ? `<label class="field"><span class="label">Guma na start</span>${bandSelect('data-pe="band"', e.band??0)}</label>`
+    + (t==="band" ? `<label class="field wide"><span class="label">Guma na start</span>${bandSelect('data-pe="band"', e.band??0)}</label>`
                   : f("weight","Start kg",e.weight,"decimal") + f("inc","Krok kg",e.inc,"decimal"));
   const progSel = t==="time" ? "" : `<label class="field prog"><span class="label">Po zrobieniu celu</span><select data-pe="prog">
       <option value="" ${!e.prog?"selected":""}>Jak w ustawieniach</option>
@@ -515,7 +515,7 @@ function viewPlan(){
   <section class="card" data-day="${di}">
     <div class="row between"><label class="field" style="flex:1;max-width:320px"><span class="label">Nazwa dnia</span><input type="text" data-pd="name" value="${esc(d.name)}"></label>
       <button class="btn sm ghost danger" data-rmday="${di}">${UI.confirmDay===di?"Na pewno?":"Usuń dzień"}</button></div>
-    <div>${d.exercises.map((e,ei)=>planExRow(e,di,ei)).join("")}</div>
+    <div class="plan-list">${d.exercises.map((e,ei)=>planExRow(e,di,ei)).join("")}</div>
     <div class="row"><button class="btn sm" data-addex="${di}">+ Ćwiczenie</button></div>
   </section>`).join("")}
   <div class="row"><button class="btn primary" data-addday>+ Dodaj dzień treningowy</button></div>
