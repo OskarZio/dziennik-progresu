@@ -194,9 +194,12 @@ async function initSync(){
   Sync.configured = !!(CFG.supabaseUrl && CFG.supabaseAnonKey && window.supabase);
   if(!Sync.configured){ setSync("off","Tylko to urządzenie"); return; }
   if(!/^https:\/\/.+\.supabase\.co\/?$/.test(CFG.supabaseUrl)){ Sync.configured = false; Sync.lastError = "W config.js pole supabaseUrl musi być adresem w stylu https://xxxx.supabase.co"; setSync("off","Błąd konfiguracji"); return; }
-  Sync.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth:{ persistSession:true, autoRefreshToken:true } });
-  const { data } = await Sync.sb.auth.getSession();
-  onAuth(data.session);
+  try{
+    Sync.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth:{ persistSession:true, autoRefreshToken:true } });
+    const { data } = await Sync.sb.auth.getSession();
+    onAuth(data.session);
+  }catch(e){ Sync.configured = false; Sync.lastError = "Nie udało się połączyć z Supabase: " + ((e && e.message) || e); setSync("off","Błąd konfiguracji"); softRender(); return; }
+  softRender();
   Sync.sb.auth.onAuthStateChange((_e, session) => onAuth(session));
   document.addEventListener("visibilitychange", () => { if(document.visibilityState==="visible") pull(); });
   window.addEventListener("online", () => pull());
