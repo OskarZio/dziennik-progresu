@@ -63,21 +63,22 @@ const findPlanEx = id => { for(const d of S.plan.days) for(const e of d.exercise
 const allExercises = () => { const m=new Map(); for(const d of S.plan.days) for(const e of d.exercises) m.set(e.id,e.name); for(const w of liveWorkouts()) for(const e of w.exercises) if(!m.has(e.exId)) m.set(e.exId,e.name); return m; };
 
 /* ---------- training logic ---------- */
-/* Three kinds of exercise: with weight (kg), with an assistance band, or held for time (handstand). */
-const TYPES = { weight:"Ciężar (kg)", band:"Guma (odciążenie)", time:"Na czas (sekundy)" };
+/* "hs" (handstand practice) only counts sets: each set is ticked as done, nothing else is logged.
+   Three kinds of exercise: with weight (kg), with an assistance band, or held for time (handstand). */
+const TYPES = { weight:"Ciężar (kg)", band:"Guma (odciążenie)", time:"Na czas (sekundy)", hs:"Stanie na rękach (serie)" };
 const bands = () => S.settings.bands;
 const bandName = i => i==null ? "–" : i >= bands().length ? "Bez gumy" : (bands()[i] ? bands()[i].name : "Guma " + (i+1));
 const typeOf = ex => ex.type || "weight";
 /* The number a set is judged by: kg, band level (higher = less help), or seconds. */
-function setValue(ex, s){ const t = typeOf(ex); return t==="time" ? (s.sec||0) : t==="band" ? (s.b==null ? 0 : s.b+1) : (s.w||0); }
-function setDone(ex, s){ return typeOf(ex)==="time" ? (s.sec!=null && s.sec>0) : (s.r!=null && s.r>0); }
-function fmtVal(ex, v){ const t = typeOf(ex); return t==="time" ? `${fmtKg(v)} s` : t==="band" ? (v>0 ? bandName(v-1) : "–") : `${fmtKg(v)} kg`; }
-function fmtSet(ex, s){ const t = typeOf(ex); return t==="time" ? `${fmtKg(s.sec)} s` : t==="band" ? `${bandName(s.b)}×${s.r}` : `${fmtKg(s.w)}×${s.r}`; }
+function setValue(ex, s){ const t = typeOf(ex); return t==="hs" ? (s.ok?1:0) : t==="time" ? (s.sec||0) : t==="band" ? (s.b==null ? 0 : s.b+1) : (s.w||0); }
+function setDone(ex, s){ const t = typeOf(ex); return t==="hs" ? !!s.ok : t==="time" ? (s.sec!=null && s.sec>0) : (s.r!=null && s.r>0); }
+function fmtVal(ex, v){ const t = typeOf(ex); return t==="hs" ? `${v} ${plural(v,"seria","serie","serii")}` : t==="time" ? `${fmtKg(v)} s` : t==="band" ? (v>0 ? bandName(v-1) : "–") : `${fmtKg(v)} kg`; }
+function fmtSet(ex, s){ const t = typeOf(ex); return t==="hs" ? "✓" : t==="time" ? `${fmtKg(s.sec)} s` : t==="band" ? `${bandName(s.b)}×${s.r}` : `${fmtKg(s.w)}×${s.r}`; }
 function exStats(ex){
   const t = typeOf(ex);
   const sets = ex.sets.filter(s => setDone(ex, s));
   const top = sets.reduce((m,s)=>Math.max(m, setValue(ex,s)), 0);
-  const reps = sets.reduce((m,s)=>m+(t==="time" ? (s.sec||0) : (s.r||0)), 0);
+  const reps = t==="hs" ? sets.length : sets.reduce((m,s)=>m+(t==="time" ? (s.sec||0) : (s.r||0)), 0);
   const vol = t==="weight" ? sets.reduce((m,s)=>m+(s.w||0)*(s.r||0), 0) : reps;
   const best = t==="weight" ? sets.reduce((m,s)=>Math.max(m, e1rm(s.w||0, s.r||0)), 0) : top;
   const fats = sets.filter(s=>s.fat!=null).map(s=>s.fat);
@@ -116,7 +117,7 @@ function incFor(ex, w){
 function suggestion(ex){
   const t = typeOf(ex);
   const done = ex.sets.filter(s => setDone(ex, s));
-  if(done.length < ex.targetSets) return null;
+  if(t==="hs" || done.length < ex.targetSets) return null;
   const first = done.slice(0, ex.targetSets);
   if(t==="time"){
     const goal = ex.secGoal || 0, low = Math.min(...first.map(s=>s.sec||0));
@@ -254,7 +255,7 @@ function achievements(workouts){
 function gains(workouts){
   const m = {};
   for(const w of workouts) for(const ex of w.exercises){
-    const st = exStats(ex); if(!st.sets || !st.top) continue;
+    const st = exStats(ex); if(!st.sets || !st.top || typeOf(ex)==="hs") continue;
     const k = keyOf(ex);
     if(!m[k]) m[k] = { ex, name:ex.name, from:st.top, best:st.top };
     m[k].best = Math.max(m[k].best, st.top); m[k].name = ex.name; m[k].ex = ex;
@@ -489,7 +490,7 @@ function buildEx(pe, date, alts){
     if(t==="band"){ const bs = pex.sets.filter(s=>setDone(pex,s)).map(s=>s.b??0); band = bs.length ? Math.max(...bs) : band; }
     if(t==="time") secGoal = pex.secGoal || secGoal;
     const minR = Math.min(...pex.sets.filter(s=>setDone(pex,s)).map(s=>s.r||0));
-    goalReps = t==="time" ? null : Math.min(pe.repMax, Math.max(pe.repMin, (isFinite(minR)?minR:pe.repMin-1)+1));
+    goalReps = t==="time"||t==="hs" ? null : Math.min(pe.repMax, Math.max(pe.repMin, (isFinite(minR)?minR:pe.repMin-1)+1));
     let up = sg && sg.kind==="up";
     const need = Math.max(1, st.needOk||1);
     if(up && need>1 && !sg.addSet){
@@ -515,10 +516,10 @@ function buildEx(pe, date, alts){
   if(wk){ sets = Math.max(1, sets + (wk.sets||0)); if(wk.deload) hints.push(`tydzień deload: ${fmtKg(wk.pct)}% ciężaru, nie walcz o rekordy`); else if(wk.pct!==100 && t==="weight") hints.push(`${wk.name}: ${fmtKg(wk.pct)}% ciężaru bazowego ${fmtKg(base)} kg`); }
   return { exId:pe.id, name:pe.name, type:t, slot:(pe.slot||"").trim().toUpperCase(), alts: alts && alts.length>1 ? alts : undefined,
     targetSets:sets, progSets, baseSets:pe.sets, maxSets:pe.maxSets, repMin:pe.repMin, repMax:pe.repMax, inc:pe.inc, incUnit:pe.incUnit||"", incPct:pe.incPct, rirTarget:pe.rirTarget,
-    prog:pe.prog||"", tempo: t==="time" ? undefined : (pe.tempo ?? st.tempo),
+    prog:pe.prog||"", tempo: t==="time"||t==="hs" ? undefined : (pe.tempo ?? st.tempo),
     base: t==="weight" ? base : undefined, pct: wk ? wk.pct : 100, deload: wk && wk.deload ? true : undefined, week: wk ? wk.name : undefined,
     secGoal: t==="time" ? secGoal : undefined, secInc: pe.secInc, goalReps, hint: hints.join("; ") || null,
-    sets: Array.from({length:sets}, () => t==="time" ? { sec:null, rate:null, fat:null, note:"", video:null }
+    sets: Array.from({length:sets}, () => t==="hs" ? { ok:false, note:"", video:null } : t==="time" ? { sec:null, rate:null, fat:null, note:"", video:null }
       : t==="band" ? { b:band, r:null, rir:null, rate:null, fat:null, note:"", video:null }
       : { w:weight, r:null, rir:null, rate:null, fat:null, note:"", video:null }) };
 }
@@ -565,6 +566,7 @@ function viewWorkout(w){
 }
 function goalText(ex){
   const t = typeOf(ex);
+  if(t==="hs") return `Cel: ${ex.targetSets} ${plural(ex.targetSets,"seria","serie","serii")}`;
   if(t==="time") return `Cel: ${ex.targetSets} × ${ex.secGoal||"?"} s`;
   const g = ex.goalReps ? ` · dziś celuj w ${ex.goalReps}` : "";
   return `Cel: ${ex.targetSets} × ${ex.repMin}–${ex.repMax} powt.${g}${ex.tempo ? ` · tempo ${esc(ex.tempo)}` : ""}`;
@@ -588,6 +590,15 @@ function bandSelect(attr, val){ return `<select ${attr}>${bands().map((b,k)=>`<o
 function setRow(ex, s, i, j){
   const t = typeOf(ex);
   const done = setDone(ex, s);
+  if(t==="hs") return `<div class="set hs ${done?"done":""}" data-set="${i}.${j}">
+    <div class="no num">${j+1}</div>
+    <button class="btn hs-done ${done?"on":""}" data-hsdone="${i}.${j}" aria-pressed="${done}">${done?"✓ Seria zrobiona":"Zaznacz serię"}</button>
+    <div class="full set-tools">
+      ${s.video ? `<button class="btn sm" data-sticker="${i}.${j}">${ICON.cam} Film i naklejka</button><button class="btn sm ghost danger" data-rmvid="${i}.${j}">Usuń film</button>`
+        : `<label class="btn sm">${ICON.cam} Dodaj film<input type="file" accept="video/*" data-video="${i}.${j}" hidden></label>`}
+      ${s.video && s.insta && s.insta.ok ? '<span class="chip up">🎥 Na Insta</span>' : ""}
+    </div>
+  </div>`;
   const main = t==="time"
     ? `<label class="field" style="grid-column:span 3"><span class="label">Sekundy</span><input type="number" inputmode="numeric" data-sf="sec" value="${s.sec??""}" placeholder="cel ${ex.secGoal||""} s"></label>`
     : `${t==="band" ? `<label class="field"><span class="label">Guma</span>${bandSelect('data-sf="b"', s.b)}</label>`
@@ -616,7 +627,8 @@ function exSummary(w, ex){
   const c = exStats(ex).sets ? compare(ex, w) : null;
   let html = "";
   if(c){
-    if(t==="time") html += `<div class="cmp">${chip(c.d.top," s","Najdłużej")}${chip(c.d.reps," s","Łącznie")}${chip(c.d.sets,"","Serie")}</div>`;
+    if(t==="hs") html += `<div class="cmp">${chip(c.d.sets,"","Serie")}</div>`;
+    else if(t==="time") html += `<div class="cmp">${chip(c.d.top," s","Najdłużej")}${chip(c.d.reps," s","Łącznie")}${chip(c.d.sets,"","Serie")}</div>`;
     else if(t==="band") html += `<div class="cmp">${bandChip(c.d.top)}${chip(c.d.reps,"","Powt.")}${chip(c.d.sets,"","Serie")}</div>`;
     else html += `<div class="cmp">${chip(c.d.top," kg","Ciężar")}${chip(c.d.reps,"","Powt.")}${chip(c.d.sets,"","Serie")}${chip(c.d.vol," kg","Objętość")}</div>`;
   }
@@ -634,15 +646,16 @@ function planExRow(e, di, ei){
   const t = typeOf(e);
   const f = (k, label, v, mode="numeric") => `<label class="field"><span class="label">${label}</span><input type="number" inputmode="${mode}" data-pe="${k}" value="${v??""}"></label>`;
   let fields;
-  if(t==="time") fields = f("sets","Serie",e.sets) + f("secGoal","Cel (s)",e.secGoal) + f("secInc","Krok (s)",e.secInc);
+  if(t==="hs") fields = f("sets","Serie",e.sets);
+  else if(t==="time") fields = f("sets","Serie",e.sets) + f("secGoal","Cel (s)",e.secGoal) + f("secInc","Krok (s)",e.secInc);
   else fields = f("sets","Serie",e.sets) + f("repMin","Powt. min",e.repMin) + f("repMax","Cel powt.",e.repMax)
     + `<label class="field"><span class="label">Tempo</span><input type="text" inputmode="numeric" maxlength="7" data-pe="tempo" value="${esc(e.tempo ?? S.settings.tempo)}"></label>`
     + (t==="band" ? `<label class="field wide"><span class="label">Guma na start</span>${bandSelect('data-pe="band"', e.band??0)}</label>`
                   : f("weight","Start kg",e.weight,"decimal") + ((e.incUnit||S.settings.incUnit)==="%" ? f("incPct","Krok %",e.incPct ?? S.settings.incPct,"decimal") : f("inc","Krok kg",e.inc,"decimal")));
   const m = progOfEx(e);
-  if(t!=="time" && m==="sets") fields += f("maxSets","Max serii",e.maxSets ?? (e.sets + (S.settings.maxSetsAdd ?? 2)));
-  if(t!=="time" && m==="rir") fields += f("rirTarget","RIR cel",e.rirTarget ?? S.settings.rirTarget);
-  const progSel = t==="time" ? "" : `<label class="field prog"><span class="label">Progresja</span><select data-pe="prog">
+  if(t!=="time" && t!=="hs" && m==="sets") fields += f("maxSets","Max serii",e.maxSets ?? (e.sets + (S.settings.maxSetsAdd ?? 2)));
+  if(t!=="time" && t!=="hs" && m==="rir") fields += f("rirTarget","RIR cel",e.rirTarget ?? S.settings.rirTarget);
+  const progSel = t==="time"||t==="hs" ? "" : `<label class="field prog"><span class="label">Progresja</span><select data-pe="prog">
       <option value="" ${!e.prog?"selected":""}>Jak w ustawieniach (${esc(PROG[S.settings.prog]||"")})</option>
       ${Object.entries(PROG).map(([k,v])=>`<option value="${k}" ${e.prog===k?"selected":""}>${v}</option>`).join("")}</select></label>`
     + (t==="weight" ? `<label class="field"><span class="label">Krok w</span><select data-pe="incUnit"><option value="" ${!e.incUnit?"selected":""}>Auto</option><option value="kg" ${e.incUnit==="kg"?"selected":""}>kg</option><option value="%" ${e.incUnit==="%"?"selected":""}>%</option></select></label>` : "");
@@ -794,7 +807,9 @@ function viewStats(){
   const fatigueLabel = avgFat==null ? "–" : avgFat.toFixed(1);
   const sx = rows.length ? rows[rows.length-1].e : { type:"weight" }, tt = typeOf(sx);
   const bandFmt = v => Number.isInteger(v) && v>0 ? bandName(v-1) : "";
-  const mainChart = tt==="time"
+  const mainChart = tt==="hs"
+    ? `<div class="legend"><span><i style="background:var(--accent)"></i>Zrobione serie</span></div>${lineChart([{data:rows.map(r=>({ label:fmtDate(r.w.date), y:r.st.sets })),color:"var(--accent)",area:true}], {label:"Serie w czasie", zero:true})}`
+    : tt==="time"
     ? `<div class="legend"><span><i style="background:var(--accent)"></i>Najdłuższa seria (s)</span></div>${lineChart([{data:topS,color:"var(--accent)",area:true}], {label:"Czas w czasie", zero:true})}<div class="label">Łączny czas w serii (s)</div>${lineChart([{data:volS,color:"var(--green)",area:true}], {h:150, zero:true, label:"Łączny czas"})}`
     : tt==="band"
     ? `<div class="legend"><span><i style="background:var(--accent)"></i>Guma (wyżej = mniej pomocy)</span></div>${lineChart([{data:topS,color:"var(--accent)",area:true}], {label:"Guma w czasie", fmt:bandFmt})}<div class="label">Powtórzenia łącznie</div>${lineChart([{data:volS,color:"var(--green)",area:true}], {h:150, zero:true, label:"Powtórzenia"})}`
@@ -942,7 +957,7 @@ async function openSticker(i, j){
   if(!url){ toast("Tego filmu nie ma na tym urządzeniu."); return; }
   const prevBest = Math.max(0, ...liveWorkouts().filter(x=>x.id!==w.id && x.date<=w.date).flatMap(x=>x.exercises.filter(e=>keyOf(e)===keyOf(ex))).map(e=>exStats(e).top));
   const isPR = setValue(ex, s) > prevBest && prevBest>0;
-  const tt = typeOf(ex), mainTxt = tt==="time" ? `${fmtKg(s.sec)} s` : tt==="band" ? `${bandName(s.b)} guma × ${s.r??"?"}` : `${fmtKg(s.w)} kg × ${s.r??"?"}`;
+  const tt = typeOf(ex), mainTxt = tt==="hs" ? `Seria ${j+1}` : tt==="time" ? `${fmtKg(s.sec)} s` : tt==="band" ? `${bandName(s.b)} guma × ${s.r??"?"}` : `${fmtKg(s.w)} kg × ${s.r??"?"}`;
   const st = Object.assign({ style:0, pos:0, show:{ date:true, rir:true, pr:true, name:true }, checks:{} }, s.insta||{});
   const root = $("#modal-root");
   root.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-label="Film i naklejka"><div class="sheet">
@@ -1012,7 +1027,7 @@ async function openSticker(i, j){
   // Instagram check: automatic signals from the log + things only you can judge on the clip.
   const auto = [
     ["Technika oceniona na 4–5", (s.rate||0)>=4],
-    tt==="time" ? ["Wytrzymany cel czasu", (s.sec||0) >= (ex.secGoal||0)] : ["Seria zrobiona w pełnym zakresie (≥ dolny cel powt.)", (s.r||0)>=ex.repMin],
+    tt==="hs" ? ["Seria zaznaczona jako zrobiona", !!s.ok] : tt==="time" ? ["Wytrzymany cel czasu", (s.sec||0) >= (ex.secGoal||0)] : ["Seria zrobiona w pełnym zakresie (≥ dolny cel powt.)", (s.r||0)>=ex.repMin],
     [tt==="time"?"Czas co najmniej taki jak ostatnio":tt==="band"?"Guma nie mocniejsza niż ostatnio":"Ciężar co najmniej taki jak ostatnio", setValue(ex,s) >= (previousEx(keyOf(ex), w.date, w.id) ? exStats(previousEx(keyOf(ex), w.date, w.id).ex).top : 0)],
   ];
   const manual = [["light","Dobre światło, widać sylwetkę"],["frame","Całe ciało i sztanga w kadrze"],["stable","Telefon stabilny, bez przypadkowych osób"],["clean","Bez nieudanego powtórzenia na końcu"]];
@@ -1069,6 +1084,7 @@ document.addEventListener("click", async e => {
   if(d.swap){ swapVariant(+d.swap); return; }
   if(d.addset){ const { w, ex } = setAt(d.addset); const last = ex.sets[ex.sets.length-1] || {}; ex.sets.push({ w:last.w??null, r:null, rir:null, rate:null, fat:null, note:"", video:null }); touchWorkout(w); rerenderEx(+d.addset); return; }
   if(d.rmset){ const { w, ex } = setAt(d.rmset); const s = ex.sets.pop(); if(s && s.video) removeVideo(s.video); touchWorkout(w); rerenderEx(+d.rmset); return; }
+  if(d.hsdone){ const { w, s, i } = setAt(d.hsdone); s.ok = !s.ok; touchWorkout(w); rerenderEx(i); return; }
   if(d.rate){ const p = t.closest("[data-set]").dataset.set; const { w, s, i } = setAt(p); s.rate = s.rate===+d.rate ? null : +d.rate; touchWorkout(w); t.parentNode.querySelectorAll("button").forEach(b=>b.classList.toggle("on", +b.dataset.rate===s.rate)); refreshEx(i); return; }
   if(d.note){ UI.noteOpen = d.note; rerenderEx(+d.note.split(".")[0]); const ta = document.querySelector(`[data-set="${d.note}"] textarea`); if(ta) ta.focus(); return; }
   if(d.rmvid){ const { w, s, i } = setAt(d.rmvid); if(s.video){ removeVideo(s.video); s.video = null; s.insta = null; } touchWorkout(w); rerenderEx(i); return; }

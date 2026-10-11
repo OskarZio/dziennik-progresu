@@ -1,6 +1,6 @@
 // Offline support: app files are served network-first so updates show up right away,
 // with the cached copy as the fallback when the gym has no signal.
-const CACHE = "dp-v8";
+const CACHE = "dp-v9";
 const SHELL = ["./", "index.html", "app.js", "config.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png", "icons/icon-maskable.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"];
 
