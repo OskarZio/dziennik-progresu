@@ -193,6 +193,7 @@ function setSync(state, text){
 async function initSync(){
   Sync.configured = !!(CFG.supabaseUrl && CFG.supabaseAnonKey && window.supabase);
   if(!Sync.configured){ setSync("off","Tylko to urządzenie"); return; }
+  if(!/^https:\/\/.+\.supabase\.co\/?$/.test(CFG.supabaseUrl)){ Sync.configured = false; Sync.lastError = "W config.js pole supabaseUrl musi być adresem w stylu https://xxxx.supabase.co"; setSync("off","Błąd konfiguracji"); return; }
   Sync.sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth:{ persistSession:true, autoRefreshToken:true } });
   const { data } = await Sync.sb.auth.getSession();
   onAuth(data.session);
@@ -239,9 +240,10 @@ async function pull(){
     if(!mine || (mine.updated_at||0) < (S.profileAt||0) || !Sync.pushedAll) queueAthlete();
     Sync.pushedAll = true;
     saveLocal();
+    Sync.lastError = null; Sync.lastOk = Date.now();
     setSync("ok","Zsynchronizowano");
     if(changed || UI.tab==="team") softRender();
-  }catch(e){ setSync("off","Błąd synchronizacji, zapisano lokalnie"); }
+  }catch(e){ Sync.lastError = (e && (e.message || e.hint)) || String(e); setSync("off","Błąd synchronizacji, zapisano lokalnie"); if(UI.tab==="team") softRender(); }
   finally{ Sync.pulling = false; }
 }
 function queueWorkout(id){
@@ -261,7 +263,7 @@ function schedule(key, fn){
     if(Sync.writing.has(key)){ Sync.pending.set(key, setTimeout(run, 600)); return; }
     Sync.pending.delete(key); Sync.writing.add(key); setSync("busy","Zapisywanie…");
     try{ await fn(); if(!Sync.pending.size) setSync("ok","Zsynchronizowano"); }
-    catch(e){ setSync("off", navigator.onLine ? "Błąd zapisu, zapisano lokalnie" : "Offline, zapisano lokalnie"); }
+    catch(e){ Sync.lastError = (e && e.message) || String(e); setSync("off", navigator.onLine ? "Błąd zapisu, zapisano lokalnie" : "Offline, zapisano lokalnie"); }
     finally{ Sync.writing.delete(key); }
   }, 1200));
 }
@@ -678,8 +680,10 @@ function viewTeam(){
   </section>`;
 }
 function accountCard(){
-  if(!Sync.configured) return `<div class="banner warn">${ICON.info}<span>Synchronizacja nie jest jeszcze skonfigurowana. Dane zapisują się tylko na tym urządzeniu.</span></div>`;
-  if(Sync.uid) return `<section class="card"><div class="row between"><div><h3>Konto</h3><div class="small muted">${esc(Sync.user && Sync.user.email)}</div></div><button class="btn sm" data-signout>Wyloguj</button></div></section>`;
+  if(!Sync.configured) return `<div class="banner warn">${ICON.info}<span>${esc(Sync.lastError || "Synchronizacja nie jest jeszcze skonfigurowana. Dane zapisują się tylko na tym urządzeniu.")}</span></div>`;
+  const status = Sync.lastError ? `<div class="banner warn">${ICON.info}<span>Problem z bazą: ${esc(Sync.lastError)}${/relation|schema cache|does not exist/i.test(Sync.lastError)?" Uruchom plik supabase/schema.sql w SQL Editor.":""}</span></div>`
+    : Sync.lastOk ? `<div class="banner go">${ICON.up}<span>Połączenie z bazą działa. Ostatnia synchronizacja ${new Date(Sync.lastOk).toLocaleTimeString("pl-PL",{hour:"2-digit",minute:"2-digit"})}.</span></div>` : "";
+  if(Sync.uid) return `<section class="card"><div class="row between"><div><h3>Konto</h3><div class="small muted">${esc(Sync.user && Sync.user.email)}</div></div><button class="btn sm" data-signout>Wyloguj</button></div>${status}</section>`;
   return `<section class="card"><h3>Zaloguj się, żeby synchronizować</h3>
     <p class="small muted" style="margin:0">To samo konto na iPhonie i komputerze. Brat zakłada swoje własne.</p>
     <form id="auth-form" class="row" style="align-items:end">
