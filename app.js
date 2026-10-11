@@ -48,7 +48,11 @@ const SAMPLE_PLAN = () => ({ updatedAt: 0, days: [
 let S = store.get("dp.state") || { v:1, name:"", plan: SAMPLE_PLAN(), samplePlan:true, workouts:{}, friends:[] };
 if(!S.workouts) S.workouts = {};
 if(!S.friends) S.friends = [];
-S.settings = Object.assign({ prog:"drop", tempo:"2010", theme:{ mode:"auto", accent:"", bg:"" }, bands: DEFAULT_BANDS.map(b=>({...b})) }, S.settings||{});
+/* Progression knobs: method, step in kg or %, how many good sessions before adding load,
+   automatic deload after a stall, plate rounding, target RIR, and an optional week-by-week cycle. */
+const SETTINGS_DEFAULTS = () => ({ prog:"drop", tempo:"2010", theme:{ mode:"auto", accent:"", bg:"" }, bands: DEFAULT_BANDS.map(b=>({...b})),
+  incUnit:"kg", incPct:2.5, needOk:1, deloadAfter:0, deloadPct:10, round:1.25, rirTarget:2, maxSetsAdd:2, period:{ on:false, start:"", weeks:[] } });
+S.settings = Object.assign(SETTINGS_DEFAULTS(), S.settings||{});
 if(!S.settings.theme) S.settings.theme = { mode:"auto", accent:"", bg:"" };
 if(!S.settings.tempo) S.settings.tempo = "2010";
 let UI = Object.assign({ tab:"train", activeId:null, statEx:null }, store.get("dp.ui")||{});
@@ -64,7 +68,6 @@ const TYPES = { weight:"Ciężar (kg)", band:"Guma (odciążenie)", time:"Na cza
 const bands = () => S.settings.bands;
 const bandName = i => i==null ? "–" : i >= bands().length ? "Bez gumy" : (bands()[i] ? bands()[i].name : "Guma " + (i+1));
 const typeOf = ex => ex.type || "weight";
-const progOf = pe => (pe.prog || S.settings.prog || "drop");
 /* The number a set is judged by: kg, band level (higher = less help), or seconds. */
 function setValue(ex, s){ const t = typeOf(ex); return t==="time" ? (s.sec||0) : t==="band" ? (s.b==null ? 0 : s.b+1) : (s.w||0); }
 function setDone(ex, s){ return typeOf(ex)==="time" ? (s.sec!=null && s.sec>0) : (s.r!=null && s.r>0); }
@@ -91,9 +94,25 @@ function previousEx(key, beforeDate, excludeId){
   for(let i=ws.length-1;i>=0;i--){ const e = ws[i].exercises.find(x=>keyOf(x)===key && exStats(x).sets>0); if(e) return { w:ws[i], ex:e }; }
   return null;
 }
-/* Goal reached = every planned set at the top of the rep range (or the target hold time).
-   Then the next session gets more load: +kg, a lighter band, or +seconds. With the "drop" setting
-   the rep goal goes back to the bottom of the range (3×8 at 60 kg → 3×6 at 62.5 kg). */
+/* Progression methods. "drop" = double progression (reps up to the top of the range, then +kg and
+   reps back to the minimum: 3×8 at 60 kg → 3×6 at 62.5 kg); "keep" = linear (+kg, same reps);
+   "rir" = add load when every set reached the minimum with reps in reserve above the target;
+   "sets" = add a set each time until the set ceiling, then +kg and back to the base number of sets. */
+const PROG = { drop:"Podwójna progresja", keep:"Liniowa (+kg co trening)", rir:"Wg zapasu (RIR)", sets:"Objętość (+1 seria)" };
+const PROG_HELP = {
+  drop:"Dokładasz powtórzenia do górnej granicy, potem więcej kg i wracasz do minimum (3 × 8 → 3 × 6 i +2,5 kg).",
+  keep:"Co udany trening więcej kg przy tej samej liczbie powtórzeń.",
+  rir:"Więcej kg, gdy we wszystkich seriach zrobisz minimum powtórzeń i zostaje Ci więcej zapasu (RIR) niż docelowo.",
+  sets:"Najpierw dokładasz serię co trening aż do limitu, potem więcej kg i wracasz do bazowej liczby serii."
+};
+const progOfEx = ex => ex.prog || S.settings.prog || "drop";
+const roundLoad = v => { const r = S.settings.round || 1.25; return Math.round(v / r) * r; };
+/* Weight step: fixed kg from the plan, or a percentage of the current weight rounded to plates. */
+function incFor(ex, w){
+  const unit = ex.incUnit || S.settings.incUnit || "kg";
+  if(unit==="%"){ const pct = ex.incPct ?? S.settings.incPct ?? 2.5; return Math.max(S.settings.round || 1.25, roundLoad(w * pct / 100)); }
+  return ex.inc || 2.5;
+}
 function suggestion(ex){
   const t = typeOf(ex);
   const done = ex.sets.filter(s => setDone(ex, s));
@@ -104,26 +123,62 @@ function suggestion(ex){
     if(goal && low >= goal) return { kind:"up", text:`Następnym razem: ${ex.targetSets} × ${goal + (ex.secInc||5)} s.`, nextSec: goal + (ex.secInc||5) };
     return { kind:"hold", text: goal ? `Zostań przy celu ${ex.targetSets} × ${goal} s, aż zrobisz wszystkie serie.` : "" };
   }
+  const method = progOfEx(ex);
   const allTop = first.every(s => (s.r||0) >= ex.repMax);
-  const anyLow = first.some(s => (s.r||0) < ex.repMin);
+  const allMin = first.every(s => (s.r||0) >= ex.repMin);
+  const anyLow = !allMin;
   const lowRir = first.some(s => s.rir!=null && s.rir<=0);
-  const nextReps = (ex.prog || S.settings.prog || "drop")==="drop" ? ex.repMin : ex.repMax;
+  const rt = ex.rirTarget ?? S.settings.rirTarget ?? 2;
+  const rirOk = allMin && first.every(s => s.rir!=null && s.rir >= rt + 1);
+  const hit = method==="rir" ? (rirOk || allTop) : allTop;
+  const nextReps = method==="keep" ? ex.repMax : ex.repMin;
+  const baseSets = ex.baseSets || ex.targetSets, maxSets = ex.maxSets || (baseSets + (S.settings.maxSetsAdd ?? 2));
+  const ps = ex.progSets ?? ex.targetSets, addSet = method==="sets" && hit && ps < maxSets;
   if(t==="band"){
     const b = Math.max(...first.map(s=>s.b==null?0:s.b));
-    if(allTop){
+    if(addSet) return { kind:"up", addSet:true, nextSets:ps+1, nextReps:ex.repMin, text:`Następnym razem: ${ps+1} × ${ex.repMin} z gumą ${bandName(b).toLowerCase()}.` };
+    if(hit){
       if(b >= bands().length) return { kind:"done-free", text:"Robisz pełny zakres bez gumy. Zmień typ ćwiczenia na Ciężar i zacznij dokładać kg." };
-      return { kind:"up", nextB:b+1, nextReps, lowRir, text:`Następnym razem: ${ex.targetSets} × ${nextReps} z gumą ${bandName(b+1).toLowerCase()}${b+1>=bands().length?"":""}.` };
+      const ns = method==="sets" ? baseSets : ps;
+      return { kind:"up", nextB:b+1, nextReps, nextSets:ns, lowRir, text:`Następnym razem: ${ns} × ${nextReps} z gumą ${bandName(b+1).toLowerCase()}.` };
     }
     const minR = Math.min(...first.map(s=>s.r||0));
     return anyLow ? { kind:"hold-low", text:`Część serii poniżej ${ex.repMin} powt. Zostań przy gumie ${bandName(b).toLowerCase()}.` }
                   : { kind:"hold", text:`Zostań przy gumie ${bandName(b).toLowerCase()}, celuj w ${Math.min(ex.repMax, minR+1)} powt. w każdej serii.` };
   }
   const w = Math.max(...first.map(s=>s.w||0));
-  if(allTop) return { kind:"up", next: w + (ex.inc||2.5), nextReps, lowRir, text:`Następnym razem: ${ex.targetSets} × ${nextReps} przy ${fmtKg(w + (ex.inc||2.5))} kg.` };
+  if(addSet) return { kind:"up", addSet:true, next:w, nextSets:ps+1, nextReps:ex.repMin, text:`Następnym razem: ${ps+1} × ${ex.repMin} przy ${fmtKg(w)} kg (dodatkowa seria).` };
+  if(hit){
+    const inc = incFor(ex, w), ns = method==="sets" ? baseSets : ps;
+    return { kind:"up", next: w + inc, inc, nextReps, nextSets:ns, lowRir, text:`Następnym razem: ${ns} × ${nextReps} przy ${fmtKg(w + inc)} kg.` };
+  }
   const minR = Math.min(...first.map(s=>s.r||0));
+  if(method==="rir" && allMin) return { kind:"hold", text:`Zostań przy ${fmtKg(w)} kg. Więcej kg, gdy w każdej serii zostanie Ci co najmniej ${rt+1} powt. zapasu.` };
   if(anyLow) return { kind:"hold-low", text:`Część serii poniżej ${ex.repMin} powt. Zostań przy ${fmtKg(w)} kg, aż zrobisz pełny zakres.` };
   return { kind:"hold", text:`Zostań przy ${fmtKg(w)} kg, celuj w ${Math.min(ex.repMax, minR+1)} powt. w każdej serii.` };
 }
+/* Recent sessions of one exercise (newest first), for "N good sessions in a row" and stall detection. */
+function recentEx(key, beforeDate, n){
+  const ws = liveWorkouts().filter(w => w.date < beforeDate), out = [];
+  for(let i=ws.length-1;i>=0 && out.length<n;i--){ const e = ws[i].exercises.find(x=>keyOf(x)===key && exStats(x).sets>0); if(e) out.push({ w:ws[i], ex:e }); }
+  return out;
+}
+/* Periodization: a repeating cycle of weeks, each scaling the load (%) and adding or removing sets. */
+const PERIOD_TEMPLATES = {
+  up31:{ name:"Narastanie 3 + deload", weeks:[{name:"Tydzień 1",pct:100,sets:0},{name:"Tydzień 2",pct:102.5,sets:0},{name:"Tydzień 3",pct:105,sets:0},{name:"Deload",pct:60,sets:-1,deload:true}] },
+  wave:{ name:"Fale: lekki, średni, ciężki", weeks:[{name:"Lekki",pct:90,sets:1},{name:"Średni",pct:95,sets:0},{name:"Ciężki",pct:102.5,sets:-1}] },
+  block:{ name:"Bloki: objętość, siła, deload", weeks:[{name:"Objętość",pct:92.5,sets:1},{name:"Objętość",pct:95,sets:1},{name:"Siła",pct:102.5,sets:0},{name:"Siła",pct:105,sets:-1},{name:"Deload",pct:60,sets:-1,deload:true}] },
+  dl6:{ name:"Deload co 6. tydzień", weeks:[...Array.from({length:5},(_,k)=>({name:`Tydzień ${k+1}`,pct:100,sets:0})),{name:"Deload",pct:60,sets:-1,deload:true}] }
+};
+const mondayOf = iso => { const d = new Date(iso+"T12:00:00"); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return d.toISOString().slice(0,10); };
+function periodWeek(date){
+  const p = S.settings.period;
+  if(!p || !p.on || !p.weeks || !p.weeks.length || !p.start) return null;
+  const n = p.weeks.length, k = Math.floor((new Date(mondayOf(date)+"T12:00:00") - new Date(mondayOf(p.start)+"T12:00:00")) / (7*864e5));
+  const idx = ((k % n) + n) % n;
+  return Object.assign({ idx, n }, p.weeks[idx]);
+}
+const weekLabel = wk => `${esc(wk.name)} · tydz. ${wk.idx+1}/${wk.n}${wk.pct!==100?` · ${fmtKg(wk.pct)}%`:""}${wk.sets?` · ${wk.sets>0?"+":""}${wk.sets} ${plural(Math.abs(wk.sets),"seria","serie","serii")}`:""}`;
 function compare(ex, workout){
   const prev = previousEx(keyOf(ex), workout.date, workout.id);
   if(!prev) return null;
@@ -270,7 +325,7 @@ async function pull(){
     if(mine){
       if(mine.plan && (mine.plan.updatedAt||0) > (S.plan.updatedAt||0)){ S.plan = mine.plan; S.samplePlan = false; changed = true; }
       if(mine.name && !S.name) S.name = mine.name;
-      if(mine.settings && (mine.settings.updatedAt||0) > (S.settings.updatedAt||0)){ S.settings = Object.assign({ tempo:"2010", theme:{ mode:"auto", accent:"", bg:"" } }, mine.settings); applyTheme(); changed = true; }
+      if(mine.settings && (mine.settings.updatedAt||0) > (S.settings.updatedAt||0)){ S.settings = Object.assign(SETTINGS_DEFAULTS(), mine.settings); applyTheme(); changed = true; }
       if(Array.isArray(mine.friends) && (mine.friends_at||0) > (S.friendsAt||0)){ S.friends = mine.friends; S.friendsAt = mine.friends_at; }
     }
     // push whatever this device has that the server lacks or has older
@@ -383,7 +438,7 @@ function viewTrain(){
   ${ios && !UI.hideInstall ? `<div class="banner info">${ICON.info}<span style="flex:1">Na iPhonie dotknij <strong>Udostępnij</strong>, potem <strong>Do ekranu początkowego</strong>. Aplikacja otworzy się jak zwykła apka, na pełnym ekranie.</span><button class="btn sm ghost" data-hideinstall aria-label="Ukryj">✕</button></div>` : ""}
   <section class="card">
     <div class="row between"><h2>Nowy trening</h2>${S.samplePlan?'<span class="sample-tag">Przykładowy plan</span>':""}</div>
-    <div class="row"><label class="field" style="max-width:200px"><span class="label">Dzień</span><input type="date" id="start-date" value="${UI.startDate||today()}"></label></div>
+    <div class="row"><label class="field" style="max-width:200px"><span class="label">Dzień</span><input type="date" id="start-date" value="${UI.startDate||today()}"></label>${periodWeek(UI.startDate||today()) ? `<span class="chip accent wk">${weekLabel(periodWeek(UI.startDate||today()))}</span>` : ""}</div>
     ${S.plan.days.length ? `<div class="days">${days}</div>` : `<div class="empty">Nie masz jeszcze planu. <button class="btn primary" data-tab="plan">Ułóż plan</button></div>`}
     ${S.samplePlan ? `<p class="small muted" style="margin:0">To przykładowy plan. Zmień go w zakładce Plan na swój.</p>`:""}
   </section>
@@ -416,27 +471,54 @@ function slotGroups(day){
 }
 function lastDone(pe){ const k = keyOf(pe); const ws = liveWorkouts(); for(let i=ws.length-1;i>=0;i--) if(ws[i].exercises.some(e=>keyOf(e)===k && exStats(e).sets)) return ws[i].date; return ""; }
 function pickVariant(group){ return group.reduce((best, pe) => lastDone(pe) < lastDone(best) ? pe : best, group[0]); }
+/* Sets up today's exercise from the last session of the same name: progression method, the
+   "good sessions in a row" rule, deload after a stall, then this week's periodization on top.
+   `base` is the load before the week's % so cycles don't compound into the progression. */
 function buildEx(pe, date, alts){
-  const t = typeOf(pe);
-  const prev = previousEx(keyOf(pe), date+"~", null);
-  let weight = pe.weight, band = pe.band ?? 0, secGoal = pe.secGoal || 20, goalReps = progOf(pe)==="drop" ? pe.repMin : pe.repMax, hint = null;
+  const t = typeOf(pe), method = progOfEx(pe), st = S.settings, wk = periodWeek(date), key = keyOf(pe);
+  const plan = { type:t, prog:pe.prog||"", repMin:pe.repMin, repMax:pe.repMax, inc:pe.inc, incUnit:pe.incUnit||"", incPct:pe.incPct, secInc:pe.secInc, rirTarget:pe.rirTarget, baseSets:pe.sets, maxSets:pe.maxSets };
+  const baseOf = x => x.base!=null && x.pct && x.pct!==100 ? x.base : exStats(x).top;
+  const judge = x => x.deload ? null : suggestion(Object.assign({}, x, plan, { targetSets:x.targetSets||pe.sets, progSets:x.progSets ?? x.targetSets }));
+  let base = pe.weight, band = pe.band ?? 0, secGoal = pe.secGoal || 20, sets = pe.sets, goalReps = method==="keep" ? pe.repMax : pe.repMin;
+  const hints = [];
+  const prev = previousEx(key, date+"~", null);
   if(prev){
-    const pex = prev.ex, sg = suggestion(Object.assign({}, pex, { type:t, targetSets:pe.sets, prog:pe.prog, repMin:pe.repMin, repMax:pe.repMax, inc:pe.inc, secInc:pe.secInc }));
-    if(t==="weight"){ weight = exStats(pex).top; }
+    const pex = prev.ex, sg = judge(pex);
+    if(method==="sets") sets = Math.max(pe.sets, pex.progSets ?? pex.targetSets ?? pe.sets);
+    if(t==="weight") base = baseOf(pex);
     if(t==="band"){ const bs = pex.sets.filter(s=>setDone(pex,s)).map(s=>s.b??0); band = bs.length ? Math.max(...bs) : band; }
-    if(t==="time"){ secGoal = pex.secGoal || secGoal; }
+    if(t==="time") secGoal = pex.secGoal || secGoal;
     const minR = Math.min(...pex.sets.filter(s=>setDone(pex,s)).map(s=>s.r||0));
     goalReps = t==="time" ? null : Math.min(pe.repMax, Math.max(pe.repMin, (isFinite(minR)?minR:pe.repMin-1)+1));
-    if(sg && sg.kind==="up"){
-      if(t==="weight"){ weight = sg.next; goalReps = sg.nextReps; hint = `+${fmtKg(pe.inc)} kg i cel ${sg.nextReps} powt., bo ostatnio zrobiłeś komplet`; }
-      if(t==="band"){ band = sg.nextB; goalReps = sg.nextReps; hint = `słabsza guma (${bandName(sg.nextB).toLowerCase()}) i cel ${sg.nextReps} powt., bo ostatnio zrobiłeś komplet`; }
-      if(t==="time"){ secGoal = sg.nextSec; hint = `cel ${sg.nextSec} s, bo ostatnio wszystkie serie trwały ${pex.secGoal||secGoal} s lub dłużej`; }
+    let up = sg && sg.kind==="up";
+    const need = Math.max(1, st.needOk||1);
+    if(up && need>1 && !sg.addSet){
+      const rec = recentEx(key, date+"~", need);
+      let ok = 0; for(const r of rec){ const g = judge(r.ex); if(!g || g.kind!=="up" || (t==="weight" && baseOf(r.ex)!==base)) break; ok++; }
+      if(ok < need){ up = false; hints.push(`cel zrobiony ${ok} z ${need} razy z rzędu, zostajesz przy tym obciążeniu`); }
+    }
+    if(up){
+      if(sg.nextSets) sets = sg.nextSets;
+      if(sg.addSet){ goalReps = sg.nextReps; hints.push(`+1 seria (${sets}), bo ostatnio zrobiłeś komplet`); }
+      else if(t==="weight"){ const inc = incFor(plan, base); base += inc; goalReps = sg.nextReps; hints.push(`+${fmtKg(inc)} kg i cel ${sg.nextReps} powt., bo ostatnio zrobiłeś komplet`); }
+      else if(t==="band"){ band = sg.nextB; goalReps = sg.nextReps; hints.push(`słabsza guma (${bandName(sg.nextB).toLowerCase()}) i cel ${sg.nextReps} powt., bo ostatnio zrobiłeś komplet`); }
+      else if(t==="time"){ secGoal = sg.nextSec; hints.push(`cel ${sg.nextSec} s, bo ostatnio wszystkie serie trwały ${pex.secGoal||secGoal} s lub dłużej`); }
+    } else if(t==="weight" && st.deloadAfter>0 && sg){
+      const rec = recentEx(key, date+"~", st.deloadAfter);
+      const stalled = rec.length===st.deloadAfter && rec.every(r => !r.ex.deload && baseOf(r.ex)===base && (judge(r.ex)||{}).kind!=="up")
+        && exStats(rec[0].ex).reps <= exStats(rec[rec.length-1].ex).reps;
+      if(stalled){ const nb = roundLoad(base * (1 - (st.deloadPct||10)/100)); hints.push(`${st.deloadAfter} ${plural(st.deloadAfter,"trening","treningi","treningów")} bez postępu, więc zjazd o ${fmtKg(st.deloadPct||10)}% (${fmtKg(base)} → ${fmtKg(nb)} kg)`); base = nb; goalReps = pe.repMin; if(method==="sets") sets = pe.sets; }
     }
   }
+  const progSets = sets;
+  const weight = t==="weight" && wk ? roundLoad(base * wk.pct / 100) : base;
+  if(wk){ sets = Math.max(1, sets + (wk.sets||0)); if(wk.deload) hints.push(`tydzień deload: ${fmtKg(wk.pct)}% ciężaru, nie walcz o rekordy`); else if(wk.pct!==100 && t==="weight") hints.push(`${wk.name}: ${fmtKg(wk.pct)}% ciężaru bazowego ${fmtKg(base)} kg`); }
   return { exId:pe.id, name:pe.name, type:t, slot:(pe.slot||"").trim().toUpperCase(), alts: alts && alts.length>1 ? alts : undefined,
-    targetSets:pe.sets, repMin:pe.repMin, repMax:pe.repMax, inc:pe.inc, prog:pe.prog||"", tempo: t==="time" ? undefined : (pe.tempo ?? S.settings.tempo),
-    secGoal: t==="time" ? secGoal : undefined, secInc: pe.secInc, goalReps, hint,
-    sets: Array.from({length:pe.sets}, () => t==="time" ? { sec:null, rate:null, fat:null, note:"", video:null }
+    targetSets:sets, progSets, baseSets:pe.sets, maxSets:pe.maxSets, repMin:pe.repMin, repMax:pe.repMax, inc:pe.inc, incUnit:pe.incUnit||"", incPct:pe.incPct, rirTarget:pe.rirTarget,
+    prog:pe.prog||"", tempo: t==="time" ? undefined : (pe.tempo ?? st.tempo),
+    base: t==="weight" ? base : undefined, pct: wk ? wk.pct : 100, deload: wk && wk.deload ? true : undefined, week: wk ? wk.name : undefined,
+    secGoal: t==="time" ? secGoal : undefined, secInc: pe.secInc, goalReps, hint: hints.join("; ") || null,
+    sets: Array.from({length:sets}, () => t==="time" ? { sec:null, rate:null, fat:null, note:"", video:null }
       : t==="band" ? { b:band, r:null, rir:null, rate:null, fat:null, note:"", video:null }
       : { w:weight, r:null, rir:null, rate:null, fat:null, note:"", video:null }) };
 }
@@ -469,6 +551,7 @@ function viewWorkout(w){
       <h2>${esc(w.dayName)}</h2>
       <label class="field" style="max-width:170px"><span class="label">Data</span><input type="date" data-wf="date" value="${w.date}"></label>
     </div>
+    ${periodWeek(w.date) ? `<div class="row"><span class="chip accent wk">${weekLabel(periodWeek(w.date))}</span></div>` : ""}
     ${w.sample?'<div class="banner warn">To przykładowy trening. Usuń przykłady w zakładce Statystyki.</div>':""}
   </section>
   ${w.exercises.map((ex,i)=>exCard(w,ex,i)).join("")}
@@ -537,9 +620,10 @@ function exSummary(w, ex){
     else if(t==="band") html += `<div class="cmp">${bandChip(c.d.top)}${chip(c.d.reps,"","Powt.")}${chip(c.d.sets,"","Serie")}</div>`;
     else html += `<div class="cmp">${chip(c.d.top," kg","Ciężar")}${chip(c.d.reps,"","Powt.")}${chip(c.d.sets,"","Serie")}${chip(c.d.vol," kg","Objętość")}</div>`;
   }
-  if(sg && sg.kind==="up"){
-    const head = t==="time" ? "Wydłuż czas." : t==="band" ? "Weź słabszą gumę." : "Zwiększ ciężar.";
-    html += `<div class="banner go" style="margin-top:10px">${ICON.up}<span><strong>${head}</strong> Cel zrobiony we wszystkich ${ex.targetSets} seriach. ${esc(sg.text)}${sg.lowRir?" Część serii była do upadku (RIR 0), więc zacznij ostrożnie.":""}</span></div>`;
+  if(ex.deload && sg && sg.kind==="up") html += `<div class="banner info" style="margin-top:10px">${ICON.info}<span>Tydzień deload. Cel zrobiony, ale ciężar rośnie dopiero po deloadzie.</span></div>`;
+  else if(sg && sg.kind==="up"){
+    const head = sg.addSet ? "Dodaj serię." : t==="time" ? "Wydłuż czas." : t==="band" ? "Weź słabszą gumę." : "Zwiększ ciężar.";
+    html += `<div class="banner go" style="margin-top:10px">${ICON.up}<span><strong>${head}</strong> Cel zrobiony we wszystkich ${ex.targetSets} seriach.${(S.settings.needOk||1)>1 && !sg.addSet ? ` Ciężar wzrośnie po ${S.settings.needOk} takich treningach z rzędu.` : ""} ${esc(sg.text)}${sg.lowRir?" Część serii była do upadku (RIR 0), więc zacznij ostrożnie.":""}</span></div>`;
   } else if(sg && sg.kind==="done-free") html += `<div class="banner go" style="margin-top:10px">${ICON.up}<span>${esc(sg.text)}</span></div>`;
   else if(sg && sg.text) html += `<div class="banner ${sg.kind==="hold-low"?"warn":"info"}" style="margin-top:10px">${ICON.info}<span>${esc(sg.text)}</span></div>`;
   return html;
@@ -554,11 +638,14 @@ function planExRow(e, di, ei){
   else fields = f("sets","Serie",e.sets) + f("repMin","Powt. min",e.repMin) + f("repMax","Cel powt.",e.repMax)
     + `<label class="field"><span class="label">Tempo</span><input type="text" inputmode="numeric" maxlength="7" data-pe="tempo" value="${esc(e.tempo ?? S.settings.tempo)}"></label>`
     + (t==="band" ? `<label class="field wide"><span class="label">Guma na start</span>${bandSelect('data-pe="band"', e.band??0)}</label>`
-                  : f("weight","Start kg",e.weight,"decimal") + f("inc","Krok kg",e.inc,"decimal"));
-  const progSel = t==="time" ? "" : `<label class="field prog"><span class="label">Po zrobieniu celu</span><select data-pe="prog">
-      <option value="" ${!e.prog?"selected":""}>Jak w ustawieniach</option>
-      <option value="drop" ${e.prog==="drop"?"selected":""}>${t==="band"?"Słabsza guma":"Więcej kg"}, powt. od minimum</option>
-      <option value="keep" ${e.prog==="keep"?"selected":""}>${t==="band"?"Słabsza guma":"Więcej kg"}, powt. bez zmian</option></select></label>`;
+                  : f("weight","Start kg",e.weight,"decimal") + ((e.incUnit||S.settings.incUnit)==="%" ? f("incPct","Krok %",e.incPct ?? S.settings.incPct,"decimal") : f("inc","Krok kg",e.inc,"decimal")));
+  const m = progOfEx(e);
+  if(t!=="time" && m==="sets") fields += f("maxSets","Max serii",e.maxSets ?? (e.sets + (S.settings.maxSetsAdd ?? 2)));
+  if(t!=="time" && m==="rir") fields += f("rirTarget","RIR cel",e.rirTarget ?? S.settings.rirTarget);
+  const progSel = t==="time" ? "" : `<label class="field prog"><span class="label">Progresja</span><select data-pe="prog">
+      <option value="" ${!e.prog?"selected":""}>Jak w ustawieniach (${esc(PROG[S.settings.prog]||"")})</option>
+      ${Object.entries(PROG).map(([k,v])=>`<option value="${k}" ${e.prog===k?"selected":""}>${v}</option>`).join("")}</select></label>`
+    + (t==="weight" ? `<label class="field"><span class="label">Krok w</span><select data-pe="incUnit"><option value="" ${!e.incUnit?"selected":""}>Auto</option><option value="kg" ${e.incUnit==="kg"?"selected":""}>kg</option><option value="%" ${e.incUnit==="%"?"selected":""}>%</option></select></label>` : "");
   const slot = (e.slot||"").trim().toUpperCase();
   const mates = slot ? S.plan.days[di].exercises.filter(o => o!==e && (o.slot||"").trim().toUpperCase()===slot) : [];
   return `<div class="plan-ex ${mates.length?"variant":""}" data-pex="${di}.${ei}">
@@ -574,6 +661,29 @@ function planExRow(e, di, ei){
       <button class="btn sm" data-addvar="${di}.${ei}">+ Wariant wymienny</button>
     </div>
   </div>`;
+}
+const ACCENTS = [["Niebieski","#1f5fd1"],["Czerwony","#d43a2f"],["Zielony","#178a4c"],["Pomarańczowy","#ee7a12"],["Złoty","#d9a400"],["Fioletowy","#7a4fd6"],["Różowy","#d63f86"],["Turkus","#0f9ba3"],["Grafit","#3a4352"]];
+const BGS = [["Jak w telefonie",""],["Jasne","#eceff4"],["Kremowe","#f4efe6"],["Granat","#0e131b"],["Czarne","#000000"],["Grafit","#1b1d22"],["Butelkowa zieleń","#0f1a16"],["Śliwka","#17121f"]];
+function periodSection(st){
+  const p = st.period, wk = periodWeek(today());
+  return `<h3>Periodyzacja</h3>
+    <label class="row switch"><input type="checkbox" id="period-on" ${p.on?"checked":""}><span>Cykl tygodni (fale, deload)</span></label>
+    <p class="small muted" style="margin:0">Każdy tydzień cyklu zmienia ciężar o procent ciężaru bazowego i może dodać lub odjąć serie. Progresja liczy się od ciężaru bazowego, a tydzień deload nie wpływa na podpowiedzi.</p>
+    ${p.on ? `
+    <div class="row">${Object.entries(PERIOD_TEMPLATES).map(([k,v])=>`<button class="btn sm" data-ptpl="${k}">${esc(v.name)}</button>`).join("")}</div>
+    <div class="set-grid">
+      <label class="field"><span class="label">Początek cyklu</span><input type="date" id="period-start" value="${esc(p.start)}"></label>
+      <div class="field"><span class="label">Teraz</span><div>${wk ? `<span class="chip accent wk">${weekLabel(wk)}</span>` : "–"}</div></div>
+    </div>
+    <div class="weeks">${p.weeks.map((w,k)=>`<div class="week ${w.deload?"deload":""} ${wk && wk.idx===k?"now":""}" data-week="${k}">
+      <span class="no num">${k+1}</span>
+      <label class="field nm"><span class="label">Nazwa</span><input type="text" data-pw="name" value="${esc(w.name)}"></label>
+      <label class="field"><span class="label">Ciężar %</span><input type="number" inputmode="decimal" data-pw="pct" value="${w.pct}"></label>
+      <label class="field"><span class="label">Serie ±</span><input type="number" inputmode="numeric" data-pw="sets" value="${w.sets||0}"></label>
+      <label class="row dl"><input type="checkbox" data-pw="deload" ${w.deload?"checked":""}><span class="small">Deload</span></label>
+      <button class="btn sm ghost" data-rmweek="${k}" aria-label="Usuń tydzień">✕</button>
+    </div>`).join("")}</div>
+    <div class="row"><button class="btn sm" data-addweek>+ Tydzień</button><button class="btn sm ghost" data-pnow>Zacznij cykl od tego tygodnia</button></div>` : ""}`;
 }
 function viewPlan(){
   const st = S.settings;
@@ -593,17 +703,28 @@ function viewPlan(){
   <div class="row"><button class="btn primary" data-addday>+ Dodaj dzień treningowy</button></div>
   <section class="card">
     <h2>Ustawienia</h2>
-    <h3>Progresja</h3>
-    <label class="field"><span class="label">Gdy zrobisz cel</span>
-      <select id="set-prog">
-        <option value="drop" ${st.prog==="drop"?"selected":""}>Więcej kg, powt. do minimum</option>
-        <option value="keep" ${st.prog==="keep"?"selected":""}>Więcej kg, powt. bez zmian</option>
-      </select></label>
-    <p class="small muted" style="margin:0">„Do minimum”: zrobione 3 × 8 daje 3 × 6 i +2,5 kg. Każde ćwiczenie może mieć własne ustawienie w polu „Po zrobieniu celu”, a dokładkę ustawiasz w „Krok kg”.</p>
+    <h3>Progresja i przeciążenie</h3>
+    <label class="field"><span class="label">System progresji</span>
+      <select data-st="prog">${Object.entries(PROG).map(([k,v])=>`<option value="${k}" ${st.prog===k?"selected":""}>${v}</option>`).join("")}</select></label>
+    <p class="small muted" style="margin:0">${esc(PROG_HELP[st.prog]||"")} Każde ćwiczenie może mieć własny system w polu „Progresja”.</p>
+    <div class="set-grid">
+      <label class="field"><span class="label">Krok ciężaru w</span><select data-st="incUnit"><option value="kg" ${st.incUnit==="kg"?"selected":""}>kg (z planu)</option><option value="%" ${st.incUnit==="%"?"selected":""}>% ciężaru</option></select></label>
+      ${st.incUnit==="%" ? `<label class="field"><span class="label">Krok %</span><input type="number" inputmode="decimal" data-st="incPct" value="${st.incPct}"></label>` : ""}
+      <label class="field"><span class="label">Zaokrąglaj do kg</span><input type="number" inputmode="decimal" data-st="round" value="${st.round}"></label>
+      <label class="field"><span class="label">Udane treningi przed +kg</span><select data-st="needOk">${[1,2,3].map(n=>`<option value="${n}" ${st.needOk===n?"selected":""}>${n}</option>`).join("")}</select></label>
+      <label class="field"><span class="label">Deload po zastoju</span><select data-st="deloadAfter">${[[0,"Wyłączony"],[2,"Po 2 treningach"],[3,"Po 3 treningach"],[4,"Po 4 treningach"]].map(([n,l])=>`<option value="${n}" ${st.deloadAfter===n?"selected":""}>${l}</option>`).join("")}</select></label>
+      ${st.deloadAfter ? `<label class="field"><span class="label">Zjazd o %</span><input type="number" inputmode="decimal" data-st="deloadPct" value="${st.deloadPct}"></label>` : ""}
+      <label class="field"><span class="label">Docelowy RIR</span><input type="number" inputmode="numeric" data-st="rirTarget" value="${st.rirTarget}"></label>
+      <label class="field"><span class="label">Serii ponad plan (objętość)</span><input type="number" inputmode="numeric" data-st="maxSetsAdd" value="${st.maxSetsAdd}"></label>
+    </div>
+    <p class="small muted" style="margin:0">„Udane treningi przed +kg”: ile razy z rzędu musisz zrobić cel, zanim aplikacja doda ciężar. „Deload po zastoju”: gdy tyle treningów z rzędu nie przynosi postępu, ciężar spada o podany procent i budujesz od nowa.</p>
+    ${periodSection(st)}
     <label class="field" style="max-width:200px"><span class="label">Domyślne tempo</span><input type="text" id="set-tempo" value="${esc(st.tempo)}" inputmode="numeric" maxlength="7" placeholder="2010"></label>
     <p class="small muted" style="margin:0">Tempo 2010: 2 s opuszczanie, 0 s pauza na dole, 1 s w górę, 0 s pauza na górze. Nowe ćwiczenia dostają to tempo, a w planie możesz je zmienić dla każdego ćwiczenia.</p>
     <h3>Kolory aplikacji</h3>
     <div class="field"><span class="label">Motyw</span><div class="seg" id="set-mode">${[["auto","Jak w telefonie"],["light","Jasny"],["dark","Ciemny"]].map(([k,n])=>`<button aria-pressed="${st.theme.mode===k}" data-mode="${k}">${n}</button>`).join("")}</div></div>
+    <div class="field"><span class="label">Gotowe kolory przycisków</span><div class="swatches">${ACCENTS.map(([n,c])=>`<button class="sw" data-swatch="accent:${c}" style="--c:${c}" aria-label="${n}" title="${n}" aria-pressed="${st.theme.accent===c}"></button>`).join("")}</div></div>
+    <div class="field"><span class="label">Gotowe tła</span><div class="swatches">${BGS.map(([n,c])=>`<button class="sw bg" data-swatch="bg:${c}" style="--c:${c||"linear-gradient(135deg,#eceff4 50%,#0e131b 50%)"}" aria-label="${n}" title="${n}" aria-pressed="${(st.theme.bg||"")===c}"></button>`).join("")}</div></div>
     <div class="row">
       <label class="row color-pick"><input type="color" id="set-accent" value="${esc(st.theme.accent || "#1f5fd1")}"><span>Przyciski</span></label>
       <label class="row color-pick"><input type="color" id="set-bg" value="${esc(st.theme.bg || (document.documentElement.dataset.theme==="dark" || matchMedia("(prefers-color-scheme: dark)").matches ? "#0e131b" : "#eceff4"))}"><span>Tło</span></label>
@@ -991,11 +1112,17 @@ document.addEventListener("input", e => {
   }
   if(d.wf){ const w = S.workouts[UI.activeId]; w[d.wf] = t.value; touchWorkout(w); if(d.wf==="date"){ w.exercises.forEach((_,i)=>refreshEx(i)); } return; }
   if(d.pd){ const di = +t.closest("[data-day]").dataset.day; S.plan.days[di].name = t.value; touchPlan(); return; }
-  if(d.pe){ const [di,ei] = t.closest("[data-pex]").dataset.pex.split(".").map(Number); const ex = S.plan.days[di].exercises[ei]; ex[d.pe] = (d.pe==="name"||d.pe==="prog"||d.pe==="type"||d.pe==="slot"||d.pe==="tempo") ? t.value : (num(t.value) ?? 0);
+  if(d.pe){ const [di,ei] = t.closest("[data-pex]").dataset.pex.split(".").map(Number); const ex = S.plan.days[di].exercises[ei]; ex[d.pe] = (d.pe==="name"||d.pe==="prog"||d.pe==="type"||d.pe==="slot"||d.pe==="tempo"||d.pe==="incUnit") ? t.value : (num(t.value) ?? 0);
+    if(d.pe==="prog"||d.pe==="incUnit"){ touchPlan(); render(); return; }
     if(d.pe==="type"){ if(t.value==="time"){ ex.secGoal = ex.secGoal||20; ex.secInc = ex.secInc||5; } if(t.value==="band" && ex.band==null) ex.band = 0; touchPlan(); render(); return; }
     touchPlan(); return; }
   if(d.bf){ const k = +t.closest("[data-band]").dataset.band; S.settings.bands[k][d.bf] = t.value; S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); return; }
-  if(t.id==="set-prog"){ S.settings.prog = t.value; S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); return; }
+  if(d.st){ const k = d.st; S.settings[k] = (k==="prog"||k==="incUnit") ? t.value : (num(t.value) ?? 0); S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete();
+    if(t.tagName==="SELECT") render(); return; }
+  if(d.pw){ const [k, f] = [+t.closest("[data-week]").dataset.week, d.pw]; const wk = S.settings.period.weeks[k]; wk[f] = f==="name" ? t.value : f==="deload" ? t.checked : (num(t.value) ?? 0);
+    S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); if(f==="deload") render(); return; }
+  if(t.id==="period-on"){ const p = S.settings.period; p.on = t.checked; if(p.on && !p.weeks.length) p.weeks = PERIOD_TEMPLATES.up31.weeks.map(w=>({...w})); if(p.on && !p.start) p.start = mondayOf(today()); S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); render(); return; }
+  if(t.id==="period-start"){ S.settings.period.start = t.value; S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); render(); return; }
   if(t.id==="my-name"){ S.name = t.value.slice(0,40); saveLocal(); queueAthlete(); return; }
   if(t.id==="start-date"){ UI.startDate = t.value; saveLocal(); return; }
 });
@@ -1036,12 +1163,26 @@ function applyTheme(){
   const bgL = hexLum(th.bg);
   if(bgL!=null) mode = bgL < 0.2 ? "dark" : "light";
   if(mode) root.dataset.theme = mode; else delete root.dataset.theme;
-  ["--accent","--accent-soft","--accent-ink","--bg"].forEach(v=>root.style.removeProperty(v));
+  ["--accent","--accent-soft","--accent-ink","--bg","--surface","--surface-2","--line"].forEach(v=>root.style.removeProperty(v));
   if(th.accent){ root.style.setProperty("--accent", th.accent); root.style.setProperty("--accent-soft", `color-mix(in srgb, ${th.accent} 18%, transparent)`); root.style.setProperty("--accent-ink", hexLum(th.accent) > 0.4 ? "#141c2b" : "#ffffff"); }
-  if(th.bg) root.style.setProperty("--bg", th.bg);
+  if(th.bg){ const dark = bgL < 0.2, mix = dark ? "#ffffff" : "#000000";
+    root.style.setProperty("--bg", th.bg);
+    root.style.setProperty("--surface", `color-mix(in srgb, ${th.bg} ${dark?90:35}%, #ffffff)`);
+    root.style.setProperty("--surface-2", `color-mix(in srgb, ${th.bg} ${dark?84:70}%, #ffffff)`);
+    root.style.setProperty("--line", `color-mix(in srgb, ${th.bg} ${dark?78:85}%, ${mix})`); }
   const meta = document.querySelector('meta[name=theme-color]'); if(meta) meta.setAttribute("content", th.bg || th.accent || "#1f5fd1");
 }
 function saveTheme(){ S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); applyTheme(); }
+document.addEventListener("click", e => {
+  const p = S.settings.period, el = e.target.closest("[data-ptpl],[data-addweek],[data-rmweek],[data-pnow],[data-swatch]"); if(!el) return;
+  const d = el.dataset;
+  if(d.ptpl){ p.weeks = PERIOD_TEMPLATES[d.ptpl].weeks.map(w=>({...w})); if(!p.start) p.start = mondayOf(today()); }
+  else if("addweek" in d) p.weeks.push({ name:`Tydzień ${p.weeks.length+1}`, pct:100, sets:0 });
+  else if(d.rmweek) p.weeks.splice(+d.rmweek, 1);
+  else if("pnow" in d) p.start = mondayOf(today());
+  else if(d.swatch){ const [k, v] = d.swatch.split(":"); S.settings.theme[k] = v; if(k==="bg" && !v) S.settings.theme.mode = "auto"; saveTheme(); render(); return; }
+  S.settings.updatedAt = Date.now(); saveLocal(); queueAthlete(); render();
+});
 document.addEventListener("click", e => {
   const m = e.target.closest("[data-mode]"); if(m){ S.settings.theme.mode = m.dataset.mode; S.settings.theme.bg = ""; saveTheme(); render(); return; }
   if(e.target.closest("[data-resettheme]")){ S.settings.theme = { mode:"auto", accent:"", bg:"" }; saveTheme(); render(); }
