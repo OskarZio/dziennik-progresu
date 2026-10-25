@@ -56,6 +56,7 @@ S.settings = Object.assign(SETTINGS_DEFAULTS(), S.settings||{});
 if(!S.settings.theme) S.settings.theme = { mode:"auto", accent:"", bg:"" };
 if(!S.settings.tempo) S.settings.tempo = "2010";
 let UI = Object.assign({ tab:"train", activeId:null, statEx:null }, store.get("dp.ui")||{});
+UI.editName = null;
 const saveLocal = () => { store.set("dp.state", S); store.set("dp.ui", UI); };
 
 const liveWorkouts = () => Object.values(S.workouts).filter(w=>!w.deleted).sort((a,b)=> a.date===b.date ? (a.createdAt||0)-(b.createdAt||0) : a.date<b.date?-1:1);
@@ -571,12 +572,35 @@ function goalText(ex){
   const g = ex.goalReps ? ` · dziś celuj w ${ex.goalReps}` : "";
   return `Cel: ${ex.targetSets} × ${ex.repMin}–${ex.repMax} powt.${g}${ex.tempo ? ` · tempo ${esc(ex.tempo)}` : ""}`;
 }
+/* Renaming during a workout changes this workout only, unless "also in the plan" is ticked.
+   Progress follows the name, so with no sets logged yet the exercise is rebuilt from the new name's history. */
+function nameEditor(ex, i){
+  const inPlan = !!findPlanEx(ex.exId);
+  return `<div class="name-edit" data-nameedit="${i}">
+    <label class="field"><span class="label">Nazwa ćwiczenia</span><input type="text" id="ex-name-${i}" value="${esc(ex.name)}" list="ex-names"></label>
+    <datalist id="ex-names">${[...new Set(liveWorkouts().flatMap(w=>w.exercises.map(e=>e.name)).concat(S.plan.days.flatMap(d=>d.exercises.map(e=>e.name))))].filter(Boolean).map(n=>`<option value="${esc(n)}">`).join("")}</datalist>
+    ${inPlan ? `<label class="row switch small"><input type="checkbox" id="ex-name-plan-${i}"><span>Zmień też w planie</span></label>` : ""}
+    <div class="row"><button class="btn sm primary" data-savename="${i}">Zapisz</button><button class="btn sm ghost" data-cancelname>Anuluj</button></div>
+    <p class="small muted" style="margin:0">Progres liczy się po nazwie. Wpisz nazwę, której używasz w historii, żeby porównanie i podpowiedzi działały dalej.</p>
+  </div>`;
+}
+document.addEventListener("keydown", e => { const m = e.target.id && /^ex-name-(\d+)$/.exec(e.target.id); if(m && e.key==="Enter"){ e.preventDefault(); renameEx(+m[1]); } });
+function renameEx(i){
+  const w = S.workouts[UI.activeId], ex = w.exercises[i];
+  const name = ($(`#ex-name-${i}`).value || "").trim(); if(!name){ toast("Nazwa nie może być pusta."); return; }
+  const alsoPlan = $(`#ex-name-plan-${i}`) && $(`#ex-name-plan-${i}`).checked;
+  const pe = findPlanEx(ex.exId);
+  if(alsoPlan && pe){ pe.name = name; touchPlan(); }
+  if(!exStats(ex).sets && pe){ const keep = { slot:ex.slot }; w.exercises[i] = Object.assign(buildEx(Object.assign({}, pe, { name }), w.date, ex.alts), keep); }
+  else ex.name = name;
+  UI.editName = null; touchWorkout(w); rerenderEx(i); toast(alsoPlan ? "Nazwa zmieniona w treningu i w planie" : "Nazwa zmieniona w tym treningu");
+}
 function exCard(w, ex, i){
   const prev = previousEx(keyOf(ex), w.date, w.id);
   const prevTxt = prev ? `Ostatnio (${fmtDate(prev.w.date)}): ${prev.ex.sets.filter(s=>setDone(prev.ex,s)).map(s=>fmtSet(prev.ex,s)).join(", ")}` : "Pierwszy raz to ćwiczenie";
   return `<section class="card" data-ex="${i}">
     <div class="ex-head">
-      <div><div class="row" style="gap:8px">${ex.slot?`<span class="chip accent">${esc(ex.slot)}</span>`:""}<h3>${esc(ex.name)}</h3></div><div class="small muted num">${goalText(ex)}</div>
+      <div style="flex:1 1 220px;min-width:0">${UI.editName===i ? nameEditor(ex, i) : `<div class="row" style="gap:8px">${ex.slot?`<span class="chip accent">${esc(ex.slot)}</span>`:""}<h3>${esc(ex.name)}</h3><button class="btn sm ghost" data-editname="${i}" aria-label="Zmień nazwę ćwiczenia" title="Zmień nazwę">✎</button></div>`}<div class="small muted num">${goalText(ex)}</div>
         ${ex.alts ? `<button class="btn sm" style="margin-top:6px" data-swap="${i}">⇄ Zamień wariant</button>`:""}</div>
       <div class="lasttime num">${esc(prevTxt)}</div>
     </div>
@@ -1082,6 +1106,9 @@ document.addEventListener("click", async e => {
   if(d.del){ if(UI.confirmDel!==d.del){ UI.confirmDel=d.del; t.textContent="Na pewno usunąć?"; return; }
     const w = S.workouts[d.del]; w.deleted = true; w.exercises.forEach(ex=>ex.sets.forEach(s=>s.video && removeVideo(s.video))); touchWorkout(w); UI.activeId=null; UI.confirmDel=null; render(); toast("Trening usunięty"); return; }
   if(d.swap){ swapVariant(+d.swap); return; }
+  if(d.editname){ const prev = UI.editName; UI.editName = +d.editname; if(prev!=null && prev!==UI.editName) rerenderEx(prev); rerenderEx(UI.editName); focusEnd(`#ex-name-${d.editname}`); return; }
+  if(d.savename){ renameEx(+d.savename); return; }
+  if("cancelname" in d){ const k = UI.editName; UI.editName = null; if(k!=null) rerenderEx(k); return; }
   if(d.addset){ const { w, ex } = setAt(d.addset); const last = ex.sets[ex.sets.length-1] || {}; ex.sets.push({ w:last.w??null, r:null, rir:null, rate:null, fat:null, note:"", video:null }); touchWorkout(w); rerenderEx(+d.addset); return; }
   if(d.rmset){ const { w, ex } = setAt(d.rmset); const s = ex.sets.pop(); if(s && s.video) removeVideo(s.video); touchWorkout(w); rerenderEx(+d.rmset); return; }
   if(d.hsdone){ const { w, s, i } = setAt(d.hsdone); s.ok = !s.ok; touchWorkout(w); rerenderEx(i); return; }
